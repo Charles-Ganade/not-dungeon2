@@ -21,6 +21,7 @@
     "dependencies": {
         "@lancedb/lancedb": "^0.22.2",
         "fast-json-patch": "^3.1.1",
+        "json-schema-typed": "^8.0.1",
         "ollama": "^0.6.0",
         "solid-js": "^1.9.9"
     }
