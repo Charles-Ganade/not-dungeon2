@@ -45,6 +45,7 @@ export class StoryHistory {
     }
 
     public removeLastNTurns(n: number = 1) {
+        if (n < 0) throw new Error("Cannot delete a negative number of turns");
         const mutator = (draft: { turns: StoryTurn[] }) => {
             for (let i = 0; i < n; i++) {
                 if (draft.turns.pop() == undefined) return false;

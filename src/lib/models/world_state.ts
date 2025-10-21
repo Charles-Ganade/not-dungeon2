@@ -144,11 +144,3 @@ export class WorldState {
         return { apply, revert };
     }
 }
-
-const ws = new WorldState();
-ws.addPlot({
-    title: "Save the king!",
-    description:
-        "The player hears of the threat to the king. They venture forth to save him and keep the kingdom safe!",
-    player_alignment: 0.9,
-});

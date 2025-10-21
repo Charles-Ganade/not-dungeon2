@@ -98,7 +98,7 @@ export class OllamaProvider extends AIProvider {
     }
 
     async embed(params: EmbedParams): Promise<EmbedResponse> {
-        const response = await this.client.embed(params);
+        const response = await this.client.embed({ ...params, keep_alive: -1 });
         return {
             embeddings: response.embeddings,
             model_name: response.model,
