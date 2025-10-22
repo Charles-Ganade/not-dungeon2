@@ -9,46 +9,29 @@ export interface ToolDefinition {
     };
 }
 
-const tool: ToolDefinition = {
-    type: "function",
-    function: {
-        name: "get_weather",
-        description: "Get the current weather for a location.",
-        parameters: {
-            type: "object",
-            properties: {
-                location: {
-                    type: "string",
-                    description: "The location to get the weather from.",
-                },
-            },
-            required: ["location"],
-        },
-        strict: false,
-    },
-};
+export type ChatRoles = "system" | "user" | "assistant" | "tool";
 
-export type FunctionCall = {
+export interface FunctionCall {
     type: "function";
     function: {
         name: string;
+        arguments: string;
     };
-};
-
-export type ChatRoles = "system" | "user" | "assistant" | "tool";
+}
 
 export interface ChatMessage {
     role: ChatRoles;
     content: string;
     thinking?: string;
-    tool_calls?: {
-        type: "function";
-        function: {
-            name: string;
-            arguments: string; // JSON stringified
-        };
-    }[];
+    tool_calls?: FunctionCall[];
 }
+
+type _FunctionCall = {
+    type: "function";
+    function: {
+        name: string;
+    };
+};
 
 export interface ChatParams {
     model: string;
@@ -59,12 +42,12 @@ export interface ChatParams {
         | "none"
         | "auto"
         | "required"
-        | FunctionCall
+        | _FunctionCall
         | {
               type: "allowed_tools";
               allowed_tools: {
                   mode: "auto" | "required";
-                  tools: FunctionCall[];
+                  tools: _FunctionCall[];
               };
           };
     options?: {

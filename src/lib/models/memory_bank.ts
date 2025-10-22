@@ -1,21 +1,24 @@
-import { connect, Connection, Table } from "@lancedb/lancedb";
 import { ProviderRegistry } from "../ai/provider";
 import { applyPatch, compare, Operation } from "fast-json-patch";
 import { deepCopy } from "../util/objects";
 import { DeltaPair } from "./world_state";
 import { StoryTurn } from "./story_history";
+import { EntityDB } from "@babycommando/entity-db";
+import { IDBPDatabase, openDB } from "idb";
 
 export interface Memory {
-    id: string;
+    id: number;
     text: string;
     created_at_turn: number;
     last_accessed_at_turn: number;
+    vector?: number[];
 }
 
 export class MemoryBank {
     private memories: Memory[] = [];
-    private db: Connection | null = null;
-    private table: Table | null = null;
+    private db: EntityDB | null = null;
+    private rawDbPromise: Promise<IDBPDatabase> | null = null;
+    private vectorPath = "vector";
 
     private providerRegistry: ProviderRegistry;
     private embeddingModel: string;
@@ -31,47 +34,31 @@ export class MemoryBank {
         this.summarizerModel = summarizerModel;
     }
 
-    public async init(uri: string) {
-        this.db = await connect(uri);
+    public async init() {
+        // this.db = await connect(uri);
+        this.db = new EntityDB({
+            vectorPath: this.vectorPath,
+            model: this.embeddingModel,
+        });
 
-        try {
-            this.table = await this.db.openTable("memories");
-            const allRecords = await this.table
-                .query()
-                .select([
-                    "id",
-                    "text",
-                    "created_at_turn",
-                    "last_accessed_at_turn",
-                ])
-                .toArray();
+        this.rawDbPromise = openDB("EntityDB", 1, {
+            upgrade(db) {
+                if (!db.objectStoreNames.contains("vectors")) {
+                    db.createObjectStore("vectors", {
+                        keyPath: "id",
+                        autoIncrement: true,
+                    }); //
+                }
+            },
+        });
 
-            this.memories = allRecords.map((r: any) => ({
-                id: r.id,
-                text: r.text,
-                created_at_turn: r.created_at_turn,
-                last_accessed_at_turn: r.last_accessed_at_turn,
-            }));
-        } catch (e) {
-            const { embeddings } = await this.providerRegistry.embed({
-                model: this.embeddingModel,
-                input: "test",
-            });
-            const dim = embeddings[0].length;
+        const db = await this.rawDbPromise;
+        const allRecords = await db
+            .transaction("vectors", "readonly")
+            .objectStore("vectors")
+            .getAll();
 
-            const data = [
-                {
-                    id: "init_id",
-                    text: "initial memory",
-                    vector: Array(dim).fill(0.0),
-                    created_at_turn: 0,
-                    last_accessed_at_turn: 0,
-                },
-            ];
-
-            this.table = await this.db.createTable("memories", data);
-            await this.table.delete("id = 'init_id'");
-        }
+        this.memories = allRecords as Memory[];
     }
 
     private _createDeltaPair(
@@ -93,7 +80,7 @@ export class MemoryBank {
     }
 
     public async applyDelta(delta: Operation[]) {
-        if (!this.table) throw new Error("MemoryBank not initialized.");
+        if (!this.db) throw new Error("MemoryBank not initialized.");
 
         const oldMemories = deepCopy(this.memories);
         const newMemories: Memory[] = applyPatch(
@@ -106,37 +93,28 @@ export class MemoryBank {
         const oldIds = new Set(oldMemories.map((m) => m.id));
         const newIds = new Set(newMemories.map((m) => m.id));
 
-        const addedIds = [...newIds].filter((id) => !oldIds.has(id));
+        const addedMemories = newMemories.filter((m) => !oldIds.has(m.id));
         const removedIds = [...oldIds].filter((id) => !newIds.has(id));
 
-        await Promise.all([
-            // Handle removals from DB
-            ...removedIds.map((id) => this.table!.delete(`id = '${id}'`)),
-            // Handle additions to DB
-            ...addedIds.map(async (id) => {
-                const newMem = newMemories.find((m) => m.id === id);
-                if (!newMem) return;
-                // Re-embed and add the full record
-                const { embeddings } = await this.providerRegistry.embed({
-                    model: this.embeddingModel,
-                    input: newMem.text,
-                });
-                await this.table!.add([
-                    {
-                        id: newMem.id,
-                        text: newMem.text,
-                        vector: embeddings[0],
-                        created_at_turn: newMem.created_at_turn,
-                        last_accessed_at_turn: newMem.last_accessed_at_turn,
-                    },
-                ]);
-            }),
-        ]);
+        await Promise.all([...removedIds.map((id) => this.db!.delete(id))]);
+        for (const memToAdd of addedMemories) {
+            const { embeddings } = await this.providerRegistry.embed({
+                model: this.embeddingModel,
+                input: memToAdd.text,
+            });
+            const { id: oldId, ...data } = memToAdd;
+            const dataToInsert = {
+                ...data,
+                [this.vectorPath]: embeddings[0],
+            };
+            const newDbId = await this.db.insertManualVectors(dataToInsert); //
+            memToAdd.id = newDbId;
+        }
         this.memories = newMemories;
     }
 
-    public async addMemory(text: string, current_turn: number) {
-        if (!this.table) throw new Error("Memory bank is not initialized");
+    public async addMemory(text: string, currentTurn: number) {
+        if (!this.db) throw new Error("Memory bank is not initialized");
 
         const { embeddings } = await this.providerRegistry.embed({
             model: this.embeddingModel,
@@ -144,15 +122,23 @@ export class MemoryBank {
         });
 
         const vector = embeddings[0];
-        const newId = crypto.randomUUID();
+
+        // 2. Create memory data (without ID)
+        const memoryData = {
+            text,
+            created_at_turn: currentTurn,
+            last_accessed_at_turn: currentTurn,
+            [this.vectorPath]: vector, // Add vector under the correct path
+        };
+
+        const newId = await this.db.insertManualVectors(memoryData);
+
         const newMemory: Memory = {
             id: newId,
             text,
-            created_at_turn: current_turn,
-            last_accessed_at_turn: current_turn,
+            created_at_turn: currentTurn,
+            last_accessed_at_turn: currentTurn,
         };
-
-        await this.table.add([{ ...newMemory, vector }]);
 
         const deltaPair = this._createDeltaPair((draft) => {
             draft.memories.push(newMemory);
@@ -165,13 +151,13 @@ export class MemoryBank {
         turns: StoryTurn[],
         current_turn: number
     ) {
-        if (!this.table) throw new Error("Memory bank is not initialized");
+        if (!this.db) throw new Error("Memory bank is not initialized");
         const historyText = turns
             .map((t) => `${t.actor}: ${t.text}`)
             .join("\n");
 
         const prompt =
-            "Summarize the following story segment into a single, concise memory that captures the key events, facts, or character developments. Output only the memory text.";
+            "Summarize the following story segment into a single, concise memory that captures the key events, facts, or character developments. Output only the summarized memory and nothing else.";
 
         const response = await this.providerRegistry.chat({
             messages: [
@@ -201,7 +187,7 @@ export class MemoryBank {
         currentTurn: number,
         limit: number = 10
     ): Promise<Memory[]> {
-        if (!this.table) throw new Error("Memory bank is not initialized");
+        if (!this.db) throw new Error("Memory bank is not initialized");
 
         const { embeddings } = await this.providerRegistry.embed({
             model: this.embeddingModel,
@@ -209,28 +195,22 @@ export class MemoryBank {
         });
         const queryVector = embeddings[0];
 
-        const results = await this.table
-            .search(queryVector)
-            .select(["id"])
-            .limit(limit)
-            .toArray();
+        const vectorResults = (await this.db.queryManualVectors(queryVector, {
+            limit: limit * 2,
+        })) as (Memory & { similarity: number })[];
 
-        const vectorMemories: Memory[] = [];
+        const retrievedMemoryIds = new Set<number>();
         const updatePromises: Promise<any>[] = [];
-        const retrievedMemoryIds = new Set<string>();
 
-        for (const r of results as any[]) {
-            const mem = this.memories.find((m) => m.id === r.id);
-
+        for (const result of vectorResults) {
+            const mem = this.memories.find((m) => m.id === result.id);
             if (mem) {
                 mem.last_accessed_at_turn = currentTurn;
-                vectorMemories.push(mem);
                 retrievedMemoryIds.add(mem.id);
 
                 updatePromises.push(
-                    this.table.update({
-                        where: `id = '${mem.id}'`,
-                        values: { last_accessed_at_turn: currentTurn },
+                    this.db.update(mem.id, {
+                        last_accessed_at_turn: currentTurn,
                     })
                 );
             }
@@ -241,8 +221,12 @@ export class MemoryBank {
             .sort((a, b) => b.last_accessed_at_turn - a.last_accessed_at_turn)
             .slice(0, 5);
 
-        const finalMemories = [...vectorMemories, ...recentMemories];
+        const finalMemoryMap = new Map<number, Memory>();
+        vectorResults.forEach((m) => finalMemoryMap.set(m.id, m));
+        recentMemories.forEach((m) => finalMemoryMap.set(m.id, m));
 
-        return finalMemories.slice(0, limit);
+        return Array.from(finalMemoryMap.values())
+            .sort((a, b) => b.last_accessed_at_turn - a.last_accessed_at_turn)
+            .slice(0, limit);
     }
 }
