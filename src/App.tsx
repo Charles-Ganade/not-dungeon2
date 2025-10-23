@@ -4,6 +4,7 @@ import { OllamaProvider } from "./lib/ai/providers/ollama_provider";
 import { PlotCardManager } from "./lib/models/plot_card_manager";
 import { MemoryBank, Memory } from "./lib/models/memory_bank";
 import { StoryTurn } from "./lib/models/story_history";
+import { openDB } from "idb";
 
 async function runPlotCardDemo() {
     console.log("Setting up providers and PlotCardManager...");
@@ -69,6 +70,28 @@ async function runPlotCardDemo() {
 }
 
 async function runMemoryBankDemo() {
+    async function clearMemoryBankStore() {
+        try {
+            console.log(
+                "Attempting to clear 'vectors' store in 'EntityDB' database..."
+            );
+            // Open the same database entity-db uses
+            const db = await openDB("EntityDB", 1); // Version must match entity-db's init
+            if (db.objectStoreNames.contains("vectors")) {
+                const tx = db.transaction("vectors", "readwrite");
+                await tx.objectStore("vectors").clear();
+                await tx.done;
+                console.log("'vectors' object store cleared successfully.");
+            } else {
+                console.log(
+                    "'vectors' object store not found, skipping clear."
+                );
+            }
+            db.close();
+        } catch (error) {
+            console.error("Error clearing memory bank store:", error);
+        }
+    }
     async function getRawMemories(memoryBank: MemoryBank): Promise<Memory[]> {
         // Need to access the underlying DB store directly
         const rawDb = await (memoryBank as any).rawDbPromise;
@@ -78,6 +101,8 @@ async function runMemoryBankDemo() {
             .objectStore("vectors")
             .getAll();
     }
+
+    await clearMemoryBankStore();
 
     console.log("Setting up providers and MemoryBank...");
 
@@ -184,7 +209,8 @@ async function runMemoryBankDemo() {
 }
 
 const App: Component = () => {
-    runMemoryBankDemo().catch(console.error);
+    // runMemoryBankDemo().catch(console.error);
+    // runPlotCardDemo().catch(console.error);
     return (
         <p class="text-4xl text-green-700 text-center py-20">Hello tailwind!</p>
     );

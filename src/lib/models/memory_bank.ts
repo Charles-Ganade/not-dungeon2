@@ -83,12 +83,14 @@ export class MemoryBank {
         if (!this.db) throw new Error("MemoryBank not initialized.");
 
         const oldMemories = deepCopy(this.memories);
-        const newMemories: Memory[] = applyPatch(
-            oldMemories,
+        const patched = applyPatch(
+            { memories: oldMemories },
             delta,
             true,
             false
         ).newDocument;
+
+        const newMemories = patched.memories;
 
         const oldIds = new Set(oldMemories.map((m) => m.id));
         const newIds = new Set(newMemories.map((m) => m.id));
@@ -157,7 +159,7 @@ export class MemoryBank {
             .join("\n");
 
         const prompt =
-            "Summarize the following story segment into a single, concise memory that captures the key events, facts, or character developments. Output only the summarized memory and nothing else.";
+            "Summarize the following story segment into a single, concise memory that captures the key events, facts, or character developments. Output only the summarized memory and nothing else. Do not include your thinking process.";
 
         const response = await this.providerRegistry.chat({
             messages: [
@@ -179,7 +181,10 @@ export class MemoryBank {
                 frequency_penalty: 0.5,
             },
         });
-        return this.addMemory(response.message.content, current_turn);
+        let cleanOutput = response.message.content
+            .replace(/<think>[\s\S]*?<\/think>/gi, "")
+            .trim();
+        return this.addMemory(cleanOutput, current_turn);
     }
 
     public async search(

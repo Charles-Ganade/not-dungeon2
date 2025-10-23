@@ -13,10 +13,10 @@ export class GameDirector {
 
     constructor(providerRegistry: ProviderRegistry, worldState?: WorldState) {
         this.providerRegistry = providerRegistry;
-        this.worldStateTools = this.generateWorldStateTools(worldState);
+        this.worldStateTools = this.generateWorldStateTools();
     }
 
-    private generateWorldStateTools(worldState?: WorldState): ToolDefinition[] {
+    private generateWorldStateTools(): ToolDefinition[] {
         const tools: ToolDefinition[] = [
             {
                 type: "function",
@@ -211,7 +211,10 @@ export class GameDirector {
         context: string, // From ContextBuilder.buildDirectorContext
         model: string,
         options?: ChatParams["options"]
-    ): Promise<FunctionCall[] | undefined> {
+    ): Promise<{
+        tool_calls: FunctionCall[] | undefined;
+        thinking: string | undefined;
+    }> {
         const systemPrompt = `You are the Game Director. Analyze the player's action within the game context.
 1. Determine Success/Failure: Call 'determineActionResult' for the player's main action.
 2. Update Plots: Assess player alignment with active plots. Call 'updatePlot' if alignment changes significantly, or 'addPlot'/'removePlot' if necessary based on player actions deviating from or resolving plots.
@@ -228,18 +231,26 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
             tools: this.worldStateTools, // Provide all tools
             tool_choice: "auto", // Crucial: Allow the LLM to choose which tools to call, potentially multiple
             options: options,
-            format: "json", // Enforce JSON for better tool call generation
+            think: true,
         };
 
         const response = await this.providerRegistry.chat(params); //
-        return response.message.tool_calls as FunctionCall[] | undefined;
+        return {
+            tool_calls: response.message.tool_calls as
+                | FunctionCall[]
+                | undefined,
+            thinking: response.message.thinking,
+        };
     }
 
     public async assessWriterTurn(
         context: string, // From ContextBuilder.buildDirectorPostWriterContext
         model: string,
         options?: ChatParams["options"]
-    ): Promise<FunctionCall[] | undefined> {
+    ): Promise<{
+        tool_calls: FunctionCall[] | undefined;
+        thinking: string | undefined;
+    }> {
         const systemPrompt = `You are the Game Director. Review the story text that was just written. Identify if the narrative implies any changes to the world state (e.g., a character picked up an item, moved location, changed disposition; a plot point was advanced). If changes are implied, use the 'patchState' or 'updatePlot' tools to update the world state accordingly. If no state changes are implied by the text, do not call any tools. Focus **only** on calling tools for implied state updates.`;
 
         const params: ChatParams = {
@@ -257,6 +268,11 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
         };
 
         const response = await this.providerRegistry.chat(params); //
-        return response.message.tool_calls as FunctionCall[] | undefined;
+        return {
+            tool_calls: response.message.tool_calls as
+                | FunctionCall[]
+                | undefined,
+            thinking: response.message.thinking,
+        };
     }
 }
