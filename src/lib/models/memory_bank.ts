@@ -2,9 +2,9 @@ import { ProviderRegistry } from "../ai/provider";
 import { applyPatch, compare, Operation } from "fast-json-patch";
 import { deepCopy } from "../util/objects";
 import { DeltaPair } from "./world_state";
-import { StoryTurn } from "./story_history";
 import { EntityDB } from "@babycommando/entity-db";
 import { IDBPDatabase, openDB } from "idb";
+import { StoryTurn } from "./story_tree";
 
 export interface Memory {
     id: number;

@@ -264,7 +264,7 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
             ),
             tool_choice: "auto",
             options: options,
-            format: "json", // Enforce JSON for better tool call generation
+            think: true,
         };
 
         const response = await this.providerRegistry.chat(params); //
