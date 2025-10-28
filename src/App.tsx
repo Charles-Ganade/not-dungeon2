@@ -3,19 +3,18 @@ import { ProviderRegistry } from "./lib/ai/provider";
 import { OllamaProvider } from "./lib/ai/providers/ollama_provider";
 import { PlotCardManager } from "./lib/models/plot_card_manager";
 import { MemoryBank, Memory } from "./lib/models/memory_bank";
-import { StoryTurn } from "./lib/models/story_history";
 import { openDB } from "idb";
+import { StoryTurn } from "./lib/models/story_tree";
 
 async function runPlotCardDemo() {
     console.log("Setting up providers and PlotCardManager...");
 
-    const registry = new ProviderRegistry(); //
-    registry.register(new OllamaProvider()); //
-
+    const registry = new ProviderRegistry();
+    registry.register(new OllamaProvider());
     const embeddingModel = "nomic-embed-text";
 
     const plotCardManager = new PlotCardManager(registry, embeddingModel);
-    await plotCardManager.init(); // Connects to or creates DB/Table in ./lancedb directory
+    await plotCardManager.init();
 
     console.log("PlotCardManager initialized.");
 
@@ -59,9 +58,8 @@ async function runPlotCardDemo() {
     const query3 = "Where is the powerful Ring kept?";
     console.log(`Searching for: "${query3}"`);
     const results3 = await plotCardManager.search(query3, 3);
-    console.log("Results:", results3); // Expect Ring card to be first, maybe Rivendell too?
+    console.log("Results:", results3);
 
-    // --- Cleanup (Optional) ---
     console.log("\nRemoving all cards...");
     const cards = plotCardManager.getAllPlotCards().map(async (card) => {
         await plotCardManager.removePlotCard(card.id);
@@ -75,8 +73,7 @@ async function runMemoryBankDemo() {
             console.log(
                 "Attempting to clear 'vectors' store in 'EntityDB' database..."
             );
-            // Open the same database entity-db uses
-            const db = await openDB("EntityDB", 1); // Version must match entity-db's init
+            const db = await openDB("EntityDB"); // Version must match entity-db's init
             if (db.objectStoreNames.contains("vectors")) {
                 const tx = db.transaction("vectors", "readwrite");
                 await tx.objectStore("vectors").clear();
@@ -93,7 +90,6 @@ async function runMemoryBankDemo() {
         }
     }
     async function getRawMemories(memoryBank: MemoryBank): Promise<Memory[]> {
-        // Need to access the underlying DB store directly
         const rawDb = await (memoryBank as any).rawDbPromise;
         if (!rawDb) return [];
         return await rawDb
@@ -106,29 +102,24 @@ async function runMemoryBankDemo() {
 
     console.log("Setting up providers and MemoryBank...");
 
-    // 1. Setup AI Provider
-    const registry = new ProviderRegistry(); //
-    registry.register(new OllamaProvider()); //
-    // registry.setActive("ollama"); // Already active
+    const registry = new ProviderRegistry();
+    registry.register(new OllamaProvider());
 
-    // Ensure models are available in Ollama
-    const embeddingModel = "nomic-embed-text"; // <--- CHANGE if needed
-    const summarizerModel = "Qwen3-4b"; // <--- CHANGE if needed
-
-    // 2. Setup MemoryBank
+    const embeddingModel = "nomic-embed-text";
+    const summarizerModel = "Qwen3-4b";
     const memoryBank = new MemoryBank(
         registry,
         embeddingModel,
         summarizerModel
     );
-    await memoryBank.init(); // Uses entity-db with default store "vectors"
+
+    await memoryBank.init();
 
     console.log("MemoryBank initialized.");
     console.log("Initial memories loaded:", await getRawMemories(memoryBank));
 
     let currentTurn = 1;
 
-    // --- Add Memories Manually ---
     console.log(`\n--- Adding memories at Turn ${currentTurn} ---`);
     await memoryBank.addMemory(
         "The player entered the Prancing Pony inn.",
@@ -144,35 +135,28 @@ async function runMemoryBankDemo() {
     );
 
     console.log("Memories after adding:", await getRawMemories(memoryBank));
-    currentTurn++; // Increment turn counter
+    currentTurn++;
 
-    // --- Generate Memory from Turns ---
     console.log(`\n--- Generating memory at Turn ${currentTurn} ---`);
     const dummyTurns: StoryTurn[] = [
         {
-            id: "t1",
             actor: "player",
             text: "I approach Strider and ask about Gandalf.",
-            created_at: new Date(),
         },
         {
-            id: "t2",
             actor: "storywriter",
             text: "Strider looks up, surprised. 'Gandalf? I haven't seen him in weeks. Why do you ask?'",
-            created_at: new Date(),
         },
     ];
     await memoryBank.generateAndAddMemory(dummyTurns, currentTurn);
     console.log("Memories after generating:", await getRawMemories(memoryBank));
     currentTurn++;
 
-    // --- Search ---
     console.log(`\n--- Searching at Turn ${currentTurn} ---`);
     const query = "Who is the innkeeper?";
     console.log(`Searching for: "${query}"`);
     const results = await memoryBank.search(query, currentTurn, 5);
     console.log("Search Results:", results);
-    // Note: Search updates last_accessed_at_turn internally
 
     console.log(
         "Memories after search (check last_accessed_at_turn):",
@@ -180,7 +164,6 @@ async function runMemoryBankDemo() {
     );
     currentTurn++;
 
-    // --- Delta Demo (Undo/Redo) ---
     console.log(`\n--- Delta Demo at Turn ${currentTurn} ---`);
     const { newId: tempMemoryId, deltaPair } = await memoryBank.addMemory(
         "A Nazgul screeches outside the inn.",
@@ -191,15 +174,12 @@ async function runMemoryBankDemo() {
         await getRawMemories(memoryBank)
     );
 
-    // Undo the addition
     console.log("\nUndoing addMemory...");
     await memoryBank.applyDelta(deltaPair.revert);
     console.log("Memories after undo:", await getRawMemories(memoryBank));
 
-    // Redo the addition
     console.log("\nRedoing addMemory...");
     await memoryBank.applyDelta(deltaPair.apply);
-    // Note: The ID might change here due to entity-db's auto-increment!
     console.log(
         "Memories after redo (check if Nazgul memory is back, ID may differ):",
         await getRawMemories(memoryBank)
@@ -209,7 +189,7 @@ async function runMemoryBankDemo() {
 }
 
 const App: Component = () => {
-    // runMemoryBankDemo().catch(console.error);
+    runMemoryBankDemo().catch(console.error);
     // runPlotCardDemo().catch(console.error);
     return (
         <p class="text-4xl text-green-700 text-center py-20">Hello tailwind!</p>

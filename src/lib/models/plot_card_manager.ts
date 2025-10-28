@@ -4,22 +4,23 @@ import { IDBPDatabase, openDB } from "idb";
 import { EntityDB } from "@babycommando/entity-db";
 
 export interface PlotCard {
-    id: number; // Changed from string
+    id: number;
     category: string;
     name: string;
     content: string;
     triggerKeyword: string;
-    vector?: number[]; // Optional in memory
+    vector?: number[];
 }
 
 export class PlotCardManager {
-    private plotCards: PlotCard[] = []; // In-memory cache
+    private plotCards: PlotCard[] = [];
     private db: EntityDB | null = null;
     private rawDbPromise: Promise<IDBPDatabase> | null = null;
 
     private providerRegistry: ProviderRegistry;
     private embeddingModel: string;
     private vectorPath = "vector";
+    private storeName = "plot_cards";
 
     constructor(providerRegistry: ProviderRegistry, embeddingModel: string) {
         this.providerRegistry = providerRegistry;
@@ -32,24 +33,19 @@ export class PlotCardManager {
             model: this.embeddingModel,
         });
 
-        const storeName = "plot_cards";
+        const storeName = this.storeName;
 
-        // Initialize raw DB access specifically for plot cards store
-        this.rawDbPromise = openDB("PlotCardDB", 1, {
-            // Using a separate DB name for clarity
+        this.rawDbPromise = openDB("EntityDB", 1, {
             upgrade(db) {
                 if (!db.objectStoreNames.contains(storeName)) {
                     db.createObjectStore(storeName, {
                         keyPath: "id",
                         autoIncrement: true,
                     });
-                    // If needed, add indexes for category, name, etc.
-                    // store.createIndex('category', 'category');
                 }
             },
         });
 
-        // Hydrate the in-memory list
         const db = await this.rawDbPromise;
         const allRecords = await db
             .transaction(storeName, "readonly")
@@ -76,7 +72,7 @@ export class PlotCardManager {
 
         const dataToInsert = {
             ...cardData,
-            [this.vectorPath]: embeddings[0],
+            [this.vectorPath]: vector,
         };
 
         const db = await this.rawDbPromise;
@@ -90,7 +86,6 @@ export class PlotCardManager {
             id: newId as number,
         };
 
-        // Add to in-memory list
         this.plotCards.push(newCard);
 
         return deepCopy(newCard);
@@ -110,7 +105,6 @@ export class PlotCardManager {
         const updatedCardData = { ...originalCard, ...updates };
 
         let vector: number[];
-        // Re-embed only if content changed
         if (updates.content && updates.content !== originalCard.content) {
             const { embeddings } = await this.providerRegistry.embed({
                 //
@@ -119,7 +113,6 @@ export class PlotCardManager {
             });
             vector = embeddings[0];
         } else {
-            // Need the existing vector if content didn't change
             const db = await this.rawDbPromise;
             const existingRecord = await db
                 .transaction("plot_cards", "readonly")
@@ -131,24 +124,22 @@ export class PlotCardManager {
                 console.error(
                     `Cannot find existing record with ID ${id} to get vector during edit.`
                 );
-                return null; // Or handle error appropriately
+                return null;
             }
         }
 
         const recordToPut = {
             ...updatedCardData,
-            id: id, // Ensure ID is included for put
+            id: id,
             [this.vectorPath]: vector,
         };
 
-        // Update DB using put (overwrites record with the same key)
         const db = await this.rawDbPromise;
         await db
             .transaction("plot_cards", "readwrite")
             .objectStore("plot_cards")
             .put(recordToPut);
 
-        // Update in-memory list (remove vector property for consistency if desired)
         const { vector: _, ...cardForMemory } = recordToPut;
         this.plotCards[cardIndex] = cardForMemory;
 
@@ -173,11 +164,10 @@ export class PlotCardManager {
                 return true;
             } catch (e) {
                 console.error(`Failed to delete plot card ${id} from DB:`, e);
-                // Rollback in-memory change?
                 return false;
             }
         }
-        return false; // Not found in memory
+        return false;
     }
 
     public async search(query: string, limit: number = 5): Promise<PlotCard[]> {
@@ -277,7 +267,18 @@ export class PlotCardManager {
         return sortedResults.slice(0, limit).map((item) => item.card);
     }
 
-    // Helper for cosine similarity (copied from entity-db source)
+    public async clear() {
+        if (!this.rawDbPromise)
+            throw new Error("PlotCardManager not initialized.");
+
+        const db = await this.rawDbPromise;
+        const tx = db.transaction(this.storeName, "readwrite");
+        await tx.objectStore(this.storeName).clear();
+        await tx.done;
+
+        this.plotCards = [];
+    }
+
     private cosineSimilarity(vecA: number[], vecB: number[]): number {
         const dotProduct = vecA.reduce(
             (sum, val, index) => sum + val * vecB[index],
@@ -289,7 +290,7 @@ export class PlotCardManager {
         const magnitudeB = Math.sqrt(
             vecB.reduce((sum, val) => sum + val * val, 0)
         );
-        if (magnitudeA === 0 || magnitudeB === 0) return 0; // Avoid division by zero
+        if (magnitudeA === 0 || magnitudeB === 0) return 0;
         return dotProduct / (magnitudeA * magnitudeB);
-    } //
+    }
 }

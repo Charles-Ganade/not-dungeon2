@@ -5,13 +5,12 @@ import {
     ProviderRegistry,
     ToolDefinition,
 } from "../ai/provider";
-import { WorldState } from "./world_state";
 
 export class GameDirector {
     private providerRegistry: ProviderRegistry;
     private worldStateTools: ToolDefinition[];
 
-    constructor(providerRegistry: ProviderRegistry, worldState?: WorldState) {
+    constructor(providerRegistry: ProviderRegistry) {
         this.providerRegistry = providerRegistry;
         this.worldStateTools = this.generateWorldStateTools();
     }
@@ -30,7 +29,7 @@ export class GameDirector {
                             partialState: {
                                 type: "object",
                                 description:
-                                    "An object containing only the changes to merge into the world state.",
+                                    "An partial of the world state containing only the changes to merge into the world state.",
                                 additionalProperties: true, // Allows flexible state structure
                             },
                         },

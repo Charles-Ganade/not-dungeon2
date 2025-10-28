@@ -19,6 +19,7 @@ export class MemoryBank {
     private db: EntityDB | null = null;
     private rawDbPromise: Promise<IDBPDatabase> | null = null;
     private vectorPath = "vector";
+    private storeName = "memories";
 
     private providerRegistry: ProviderRegistry;
     private embeddingModel: string;
@@ -35,30 +36,52 @@ export class MemoryBank {
     }
 
     public async init() {
-        // this.db = await connect(uri);
-        this.db = new EntityDB({
-            vectorPath: this.vectorPath,
-            model: this.embeddingModel,
-        });
+        const storeName = this.storeName;
+
+        try {
+            this.db = new EntityDB({
+                vectorPath: this.vectorPath,
+                model: this.embeddingModel,
+            });
+        } catch (err) {
+            console.error("❌ Failed to create EntityDB instance:", err);
+            console.groupEnd();
+            throw err;
+        }
 
         this.rawDbPromise = openDB("EntityDB", 1, {
             upgrade(db) {
-                if (!db.objectStoreNames.contains("vectors")) {
-                    db.createObjectStore("vectors", {
+                if (!db.objectStoreNames.contains("memories")) {
+                    db.createObjectStore("memories", {
                         keyPath: "id",
                         autoIncrement: true,
-                    }); //
+                    });
+                }
+                if (!db.objectStoreNames.contains("otherStore")) {
+                    db.createObjectStore("otherStore", {
+                        keyPath: "id",
+                        autoIncrement: true,
+                    });
                 }
             },
         });
+        console.log("Stored rawDbPromise reference.");
 
         const db = await this.rawDbPromise;
-        const allRecords = await db
-            .transaction("vectors", "readonly")
-            .objectStore("vectors")
-            .getAll();
+        try {
+            console.log(`Loading records from store '${storeName}'...`);
+            const tx = db.transaction(storeName, "readonly");
+            const store = tx.objectStore(storeName);
 
-        this.memories = allRecords as Memory[];
+            const allRecords = await store.getAll();
+            console.log(
+                `✅ Retrieved ${allRecords.length} records from store '${storeName}'.`
+            );
+
+            this.memories = allRecords as Memory[];
+        } catch (err) {
+            throw err;
+        }
     }
 
     private _createDeltaPair(
@@ -125,7 +148,6 @@ export class MemoryBank {
 
         const vector = embeddings[0];
 
-        // 2. Create memory data (without ID)
         const memoryData = {
             text,
             created_at_turn: currentTurn,
@@ -147,6 +169,26 @@ export class MemoryBank {
         });
 
         return { newId, deltaPair: deltaPair! };
+    }
+
+    public async removeMemory(id: number): Promise<DeltaPair | null> {
+        if (!this.db) throw new Error("Memory bank is not initialized");
+
+        const memoryIndex = this.memories.findIndex((m) => m.id === id);
+        if (memoryIndex === -1) {
+            console.warn(`Memory with id ${id} not found.`);
+            return null;
+        }
+
+        // 1. Perform the database operation
+        await this.db.delete(id);
+
+        // 2. Create the delta pair, which also updates the in-memory state
+        const deltaPair = this._createDeltaPair((draft) => {
+            draft.memories = draft.memories.filter((m: Memory) => m.id !== id);
+        });
+
+        return deltaPair;
     }
 
     public async generateAndAddMemory(
@@ -233,5 +275,17 @@ export class MemoryBank {
         return Array.from(finalMemoryMap.values())
             .sort((a, b) => b.last_accessed_at_turn - a.last_accessed_at_turn)
             .slice(0, limit);
+    }
+
+    public async clear() {
+        if (!this.rawDbPromise) throw new Error("MemoryBank not initialized.");
+
+        const db = await this.rawDbPromise;
+        const tx = db.transaction(this.storeName, "readwrite");
+        await tx.objectStore(this.storeName).clear();
+        await tx.done;
+
+        // Also clear the in-memory cache
+        this.memories = [];
     }
 }
