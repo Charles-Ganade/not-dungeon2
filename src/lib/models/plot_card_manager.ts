@@ -1,91 +1,124 @@
 import { ProviderRegistry } from "../ai/provider";
 import { deepCopy } from "../util/objects";
-import { IDBPDatabase, openDB } from "idb";
-import { EntityDB } from "@babycommando/entity-db";
+// Removed: import { IDBPDatabase, openDB } from "idb";
+// Removed: import { EntityDB } from "@babycommando/entity-db";
+import { LocalVectorDB } from "../vectordb"; // Import LocalVectorDB
 
+// Interface for the in-memory representation
 export interface PlotCard {
-    id: number;
+    id?: number; // Make id optional for insertion
     category: string;
     name: string;
     content: string;
     triggerKeyword: string;
-    vector?: number[];
+    // vector is handled by LocalVectorDB
+}
+
+// Interface for records stored in LocalVectorDB
+interface PlotCardRecord {
+    id: number; // ID assigned by LocalVectorDB
+    vector: Float32Array; // Stored as ArrayBuffer in DB
+    meta: {
+        category: string;
+        name: string;
+        content: string;
+        triggerKeyword: string;
+    };
+    createdAt?: number;
+    updatedAt?: number;
 }
 
 export class PlotCardManager {
+    // In-memory cache mirroring DB state
     private plotCards: PlotCard[] = [];
-    private db: EntityDB | null = null;
-    private rawDbPromise: Promise<IDBPDatabase> | null = null;
+    // Changed: Use LocalVectorDB instance
+    private db: LocalVectorDB | null = null;
+    // Removed: rawDbPromise
 
     private providerRegistry: ProviderRegistry;
     private embeddingModel: string;
-    private vectorPath = "vector";
-    private storeName = "plot_cards";
+    private dbName = "PlotCardDB"; // Define a specific DB name
+    private vectorDimension: number | undefined; // We need to know the dimension
+    // Removed: vectorPath
+    // Removed: storeName (handled within LocalVectorDB now, defaults to 'vectors')
 
-    constructor(providerRegistry: ProviderRegistry, embeddingModel: string) {
+    constructor(
+        providerRegistry: ProviderRegistry,
+        embeddingModel: string,
+        // Add dimension as a required parameter
+        vectorDimension: number
+    ) {
         this.providerRegistry = providerRegistry;
         this.embeddingModel = embeddingModel;
+        this.vectorDimension = vectorDimension; // Store dimension
+
+        // Initialize LocalVectorDB
+        this.db = new LocalVectorDB({
+            dbName: this.dbName,
+            dimension: this.vectorDimension,
+            // Add other options if needed
+            normalize: true,
+            idField: "id",
+        });
     }
 
     public async init() {
-        this.db = new EntityDB({
-            vectorPath: this.vectorPath,
-            model: this.embeddingModel,
-        });
+        if (!this.db) throw new Error("LocalVectorDB instance not created.");
+        await this.db.init();
+        await this.hydrateInMemoryCache();
+    }
 
-        const storeName = this.storeName;
-
-        this.rawDbPromise = openDB("EntityDB", 1, {
-            upgrade(db) {
-                if (!db.objectStoreNames.contains(storeName)) {
-                    db.createObjectStore(storeName, {
-                        keyPath: "id",
-                        autoIncrement: true,
-                    });
-                }
-            },
-        });
-
-        const db = await this.rawDbPromise;
-        const allRecords = await db
-            .transaction(storeName, "readonly")
-            .objectStore(storeName)
-            .getAll();
-        this.plotCards = allRecords as PlotCard[];
+    // Helper to load all data from DB into the in-memory this.plotCards
+    private async hydrateInMemoryCache() {
+        if (!this.db) throw new Error("PlotCardManager not initialized.");
+        const allRecords = await this.db.export(); // Use export to get all data
+        this.plotCards = allRecords.vectors.map((record) => ({
+            id: record.id,
+            category: record.meta.category,
+            name: record.meta.name,
+            content: record.meta.content,
+            triggerKeyword: record.meta.triggerKeyword,
+        }));
     }
 
     public getAllPlotCards(): PlotCard[] {
+        // Return a copy of the in-memory cache
         return deepCopy(this.plotCards);
     }
 
     public async addPlotCard(
         cardData: Omit<PlotCard, "id">
     ): Promise<PlotCard> {
-        if (!this.rawDbPromise)
-            throw new Error("PlotCardManager not initialized.");
+        if (!this.db) throw new Error("PlotCardManager not initialized.");
 
+        // 1. Embed content
         const { embeddings } = await this.providerRegistry.embed({
             model: this.embeddingModel,
             input: cardData.content,
         });
         const vector = embeddings[0];
 
-        const dataToInsert = {
-            ...cardData,
-            [this.vectorPath]: vector,
+        // 2. Prepare metadata
+        const meta = {
+            category: cardData.category,
+            name: cardData.name,
+            content: cardData.content,
+            triggerKeyword: cardData.triggerKeyword,
         };
 
-        const db = await this.rawDbPromise;
-        const newId = await db
-            .transaction("plot_cards", "readwrite")
-            .objectStore("plot_cards")
-            .add(dataToInsert);
+        // 3. Insert into LocalVectorDB
+        const newId = await this.db.insert({
+            vector: vector,
+            meta: meta,
+        });
 
+        // 4. Create in-memory representation
         const newCard: PlotCard = {
-            ...cardData,
-            id: newId as number,
+            id: newId,
+            ...meta,
         };
 
+        // 5. Update in-memory cache
         this.plotCards.push(newCard);
 
         return deepCopy(newCard);
@@ -93,98 +126,117 @@ export class PlotCardManager {
 
     public async editPlotCard(
         id: number,
-        updates: Partial<Omit<PlotCard, "id">>
+        updates: Partial<Omit<PlotCard, "id" | "vector">> // Exclude vector from partial updates
     ): Promise<PlotCard | null> {
-        if (!this.rawDbPromise)
-            throw new Error("PlotCardManager not initialized.");
+        if (!this.db) throw new Error("PlotCardManager not initialized.");
 
         const cardIndex = this.plotCards.findIndex((c) => c.id === id);
-        if (cardIndex === -1) return null;
+        if (cardIndex === -1) {
+            console.warn(`PlotCard with id ${id} not found in cache.`);
+            return null;
+        }
 
         const originalCard = this.plotCards[cardIndex];
-        const updatedCardData = { ...originalCard, ...updates };
 
-        let vector: number[];
+        // Create the potential new state (in-memory and meta for DB)
+        const updatedMeta = {
+            category: updates.category ?? originalCard.category,
+            name: updates.name ?? originalCard.name,
+            content: updates.content ?? originalCard.content,
+            triggerKeyword:
+                updates.triggerKeyword ?? originalCard.triggerKeyword,
+        };
+
+        let vector: number[] | Float32Array;
+        let vectorNeedsUpdate = false;
+
+        // Re-embed only if content changed
         if (updates.content && updates.content !== originalCard.content) {
+            console.log(`Re-embedding PlotCard ${id} due to content change.`);
             const { embeddings } = await this.providerRegistry.embed({
-                //
                 model: this.embeddingModel,
-                input: updatedCardData.content,
+                input: updatedMeta.content,
             });
             vector = embeddings[0];
+            vectorNeedsUpdate = true;
         } else {
-            const db = await this.rawDbPromise;
-            const existingRecord = await db
-                .transaction("plot_cards", "readonly")
-                .objectStore("plot_cards")
-                .get(id);
+            // Need the existing vector if content didn't change
+            // LocalVectorDB's insert acts as upsert but needs the vector. Fetch it.
+            const existingRecord = await this.db.get(id);
             if (existingRecord) {
-                vector = existingRecord[this.vectorPath];
+                // The vector in the DB record is an ArrayBuffer, convert it
+                vector = new Float32Array(existingRecord.vector);
             } else {
                 console.error(
-                    `Cannot find existing record with ID ${id} to get vector during edit.`
+                    `Cannot find existing record with ID ${id} in DB during edit.`
                 );
                 return null;
             }
         }
 
-        const recordToPut = {
-            ...updatedCardData,
+        // Use insert for upsert functionality in LocalVectorDB
+        try {
+            await this.db.insert({
+                id: id, // Provide ID to update existing
+                vector: vector,
+                meta: updatedMeta,
+            });
+        } catch (error) {
+            console.error(`Failed to update PlotCard ${id} in DB:`, error);
+            return null;
+        }
+
+        // Update in-memory cache
+        const updatedCardInMemory: PlotCard = {
             id: id,
-            [this.vectorPath]: vector,
+            ...updatedMeta,
         };
+        this.plotCards[cardIndex] = updatedCardInMemory;
 
-        const db = await this.rawDbPromise;
-        await db
-            .transaction("plot_cards", "readwrite")
-            .objectStore("plot_cards")
-            .put(recordToPut);
-
-        const { vector: _, ...cardForMemory } = recordToPut;
-        this.plotCards[cardIndex] = cardForMemory;
-
-        return deepCopy(cardForMemory);
+        return deepCopy(updatedCardInMemory);
     }
 
     public async removePlotCard(id: number): Promise<boolean> {
-        if (!this.rawDbPromise)
-            throw new Error("PlotCardManager not initialized.");
+        if (!this.db) throw new Error("PlotCardManager not initialized.");
 
         const initialLength = this.plotCards.length;
+        // Filter in-memory cache first
         this.plotCards = this.plotCards.filter((c) => c.id !== id);
 
+        // If something was removed from cache, remove from DB
         if (this.plotCards.length < initialLength) {
-            // Remove from DB
-            const db = await this.rawDbPromise;
             try {
-                await db
-                    .transaction("plot_cards", "readwrite")
-                    .objectStore("plot_cards")
-                    .delete(id);
+                await this.db.delete(id);
                 return true;
             } catch (e) {
                 console.error(`Failed to delete plot card ${id} from DB:`, e);
+                // Optionally re-add to in-memory cache if DB delete fails?
+                // For simplicity, we assume DB delete succeeds if cache removal did.
                 return false;
             }
         }
-        return false;
+        console.warn(
+            `PlotCard with id ${id} not found in cache, nothing to remove.`
+        );
+        return false; // Not found in memory
     }
 
     public async search(query: string, limit: number = 5): Promise<PlotCard[]> {
-        if (!this.rawDbPromise || !this.db)
-            throw new Error("PlotCardManager not initialized.");
+        if (!this.db) throw new Error("PlotCardManager not initialized.");
 
-        // 1. Find keyword-triggered cards from in-memory list
-        const triggeredCardIds = new Set<number>();
+        // 1. Find keyword-triggered cards from IN-MEMORY cache
+        const triggeredCards: PlotCard[] = [];
         const lowerCaseQuery = query.toLowerCase();
         this.plotCards.forEach((card) => {
             if (
                 card.triggerKeyword &&
                 lowerCaseQuery.includes(card.triggerKeyword.toLowerCase())
             ) {
-                triggeredCardIds.add(card.id);
+                // Add a copy to avoid mutation issues
+                triggeredCards.push(deepCopy(card));
             }
         });
+        const triggeredCardIds = new Set(triggeredCards.map((c) => c.id));
 
         // 2. Embed the query text
         const { embeddings } = await this.providerRegistry.embed({
@@ -193,104 +245,64 @@ export class PlotCardManager {
         });
         const queryVector = embeddings[0];
 
-        // 3. Get *all* records from the DB to calculate similarity manually
-        //    (entity-db's query doesn't work across different object stores easily)
-        const db = await this.rawDbPromise;
-        const allRecords = await db
-            .transaction("plot_cards", "readonly")
-            .objectStore("plot_cards")
-            .getAll();
-
-        // 4. Calculate similarities manually
-        const similarities = allRecords.map((entry: any) => {
-            const similarity = this.cosineSimilarity(
-                queryVector,
-                entry[this.vectorPath]
-            );
-            // Return only necessary data + similarity
-            return {
-                id: entry.id,
-                category: entry.category,
-                name: entry.name,
-                content: entry.content,
-                triggerKeyword: entry.triggerKeyword,
-                similarity,
-            };
+        // 3. Query LocalVectorDB for semantically similar cards
+        // Fetch more than limit initially to allow combining/ranking
+        const vectorResults = await this.db.query(queryVector, {
+            k: limit + triggeredCards.length, // Fetch enough potential candidates
+            distance: "cosine", // Assuming cosine
         });
 
-        // 5. Combine and Rank
+        // 4. Combine and Rank
         const finalResultsMap = new Map<
             number,
-            { card: PlotCard; similarity: number | null }
+            { card: PlotCard; score: number }
         >();
 
-        // Add triggered cards first, finding their similarity score
-        triggeredCardIds.forEach((id) => {
-            const card = this.plotCards.find((c) => c.id === id); // Use in-memory data
-            if (card) {
-                const vectorMatch = similarities.find((r) => r.id === id);
-                finalResultsMap.set(id, {
-                    card,
-                    similarity: vectorMatch?.similarity ?? null,
+        // Add triggered cards first with a high score boost (e.g., score 2)
+        triggeredCards.forEach((card) => {
+            finalResultsMap.set(card.id!, { card: card, score: 2.0 }); // Use high score for triggered
+        });
+
+        // Add vector results, skipping duplicates already added by keyword trigger
+        vectorResults.forEach((result) => {
+            if (!finalResultsMap.has(result.id)) {
+                // Reconstruct PlotCard from DB result meta
+                const cardFromResult: PlotCard = {
+                    id: result.id,
+                    category: result.meta.category,
+                    name: result.meta.name,
+                    content: result.meta.content,
+                    triggerKeyword: result.meta.triggerKeyword,
+                };
+                finalResultsMap.set(result.id, {
+                    card: cardFromResult,
+                    score: result.score,
                 });
             }
         });
 
-        // Add vector results, skipping duplicates
-        similarities.forEach((r) => {
-            if (!finalResultsMap.has(r.id)) {
-                // Construct PlotCard from similarity result (which has all needed fields)
-                const { similarity: _, ...cardData } = r;
-                finalResultsMap.set(r.id, {
-                    card: cardData as PlotCard,
-                    similarity: r.similarity,
-                });
-            }
-        });
-
-        // 6. Sort and Limit
+        // 5. Sort combined results: Triggered first, then by similarity score
         const sortedResults = Array.from(finalResultsMap.values()).sort(
             (a, b) => {
-                const aIsTriggered = triggeredCardIds.has(a.card.id);
-                const bIsTriggered = triggeredCardIds.has(b.card.id);
-
-                if (aIsTriggered && !bIsTriggered) return -1; // a comes first
-                if (!aIsTriggered && bIsTriggered) return 1; // b comes first
-
-                // If both triggered or both not, sort by similarity (higher is better)
-                const simA = a.similarity ?? -1; // Treat null as lowest similarity
-                const simB = b.similarity ?? -1;
-                return simB - simA; // Descending order
+                // Sort primarily by score (descending), handles triggered boost
+                return b.score - a.score;
             }
         );
 
+        // 6. Return top 'limit' results
         return sortedResults.slice(0, limit).map((item) => item.card);
     }
 
+    // Updated clear method
     public async clear() {
-        if (!this.rawDbPromise)
-            throw new Error("PlotCardManager not initialized.");
+        if (!this.db) throw new Error("PlotCardManager not initialized.");
 
-        const db = await this.rawDbPromise;
-        const tx = db.transaction(this.storeName, "readwrite");
-        await tx.objectStore(this.storeName).clear();
-        await tx.done;
+        // Clear the database
+        await this.db.clear();
 
+        // Also clear the in-memory cache
         this.plotCards = [];
     }
 
-    private cosineSimilarity(vecA: number[], vecB: number[]): number {
-        const dotProduct = vecA.reduce(
-            (sum, val, index) => sum + val * vecB[index],
-            0
-        );
-        const magnitudeA = Math.sqrt(
-            vecA.reduce((sum, val) => sum + val * val, 0)
-        );
-        const magnitudeB = Math.sqrt(
-            vecB.reduce((sum, val) => sum + val * val, 0)
-        );
-        if (magnitudeA === 0 || magnitudeB === 0) return 0;
-        return dotProduct / (magnitudeA * magnitudeB);
-    }
+    // Removed cosineSimilarity helper, as it's now handled by LocalVectorDB
 }

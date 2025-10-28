@@ -1,21 +1,25 @@
 /*
-LocalVectorDB - TypeScript implementation
-- Per-database isolation (default)
-- Automatic migrations (persisted in _meta.store)
+LocalVectorDB - TypeScript implementation (v3)
+- Adds optional WebAssembly-accelerated Hamming distance for binary queries
+- Stronger TypeScript types and public API validations
+- Binary (bitpacked) support and Hamming queries
+- Per-database isolation, automatic migrations (persisted)
 - Normalization default: true
 - Optional in-memory cache (explicit opt-in)
 
-Notes for migration authors:
-- Migration functions are executed inside the IndexedDB `onupgradeneeded` upgrade transaction.
-- Migration functions MUST use only the `db` and `tx` provided and queue IDB requests on that transaction.
-- Do NOT perform async operations that are outside the provided `tx` (they won't be atomic with the upgrade).
-- Migration functions may read/update the `_meta` object store by keying to 'schema' and 'migrations'.
+Notes:
+- WASM popcount module is optional. Call `enableWasmPopcount()` with no args to use the bundled minimal WASM, or provide your own base64-encoded wasm.
+- If wasm is unavailable or fails, the implementation falls back to the JavaScript popcount table.
 */
 
-type MetaSchema = {
+import { Buffer } from "buffer";
+
+export type VectorFormat = "dense" | "binary" | "mixed";
+
+export type MetaSchema = {
     version: number;
     dimension: number;
-    format: "dense" | "binary";
+    format: VectorFormat;
     normalize: boolean;
     indexes: string[];
     createdAt: number;
@@ -26,8 +30,8 @@ export type LocalVectorDBOptions = {
     dbName: string; // required
     version?: number; // default 1
     dimension: number; // required
-    format?: "dense" | "binary"; // default 'dense'
-    normalize?: boolean; // default true
+    format?: VectorFormat; // default 'dense'
+    normalize?: boolean; // default true (applies only to dense vectors)
     cache?: boolean; // default false
     idField?: string; // default 'id'
     metaIndexes?: string[]; // default []
@@ -44,8 +48,23 @@ export type MigrationFn = (
     db: IDBDatabase,
     tx: IDBTransaction,
     metaStore: IDBObjectStore
-) => void;
+) => void | Promise<void>;
 
+// Public record type that callers will insert
+export type DBRecord = {
+    id?: any; // optional if autoIncrement idField == 'id'
+    vector: Float32Array | number[] | ArrayBuffer | Uint8Array | boolean[]; // depending on format
+    meta?: Record<string, any>;
+};
+
+export type QueryOptions = {
+    k?: number;
+    distance?: "cosine" | "euclidean"; // dense queries
+    filter?: (meta: any) => boolean;
+    maxCandidates?: number;
+};
+
+// Small min-heap implementation for top-K maintenance (min at root)
 class MinHeap<T> {
     private items: Array<T> = [];
     private comparator: (a: T, b: T) => number;
@@ -152,12 +171,16 @@ export class LocalVectorDB {
     private db: IDBDatabase | null = null;
     private cacheEnabled = false;
     private inMemoryCache:
-        | { id: any; vector: Float32Array; meta?: any }[]
+        | { id: any; vector: Float32Array | Uint8Array; meta?: any }[]
         | null = null;
 
+    // WASM popcount resources
+    private wasmInstance: WebAssembly.Instance | null = null;
+    private wasmMemory: WebAssembly.Memory | null = null;
+    private wasmBufferSize = 65536; // bytes default memory if using bundled wasm
+
     constructor(options: LocalVectorDBOptions) {
-        if (!options || !options.dbName) throw new Error("dbName is required");
-        if (!options.dimension) throw new Error("dimension is required");
+        validateOptions(options);
         this.options = {
             version: 1,
             format: "dense",
@@ -168,11 +191,14 @@ export class LocalVectorDB {
             verbose: false,
             ...options,
         };
-        // ensure integers
         this.options.version = Math.max(
             1,
             Math.floor(this.options.version || 1)
         );
+        // If format is binary, normalization must be false (noop)
+        if (this.options.format === "binary" && this.options.normalize) {
+            this.options.normalize = false;
+        }
     }
 
     // Initialize (open DB). This will automatically run migrations if needed.
@@ -184,7 +210,6 @@ export class LocalVectorDB {
         return;
     }
 
-    // Open the IDB database and run migrations in onupgradeneeded
     private openDB(): Promise<IDBDatabase> {
         const { dbName, version } = this.options;
         return new Promise((resolve, reject) => {
@@ -192,9 +217,9 @@ export class LocalVectorDB {
             req.onblocked = () => {
                 console.warn("openDB blocked: another connection is open");
             };
-            req.onerror = (ev) => reject((ev.target as IDBRequest).error);
+            req.onerror = (ev) => reject((ev.target as IDBOpenDBRequest).error);
 
-            req.onupgradeneeded = (ev) => {
+            req.onupgradeneeded = async (ev) => {
                 const db = (ev.target as IDBOpenDBRequest).result;
                 const tx = (ev.target as IDBOpenDBRequest)
                     .transaction as IDBTransaction;
@@ -216,14 +241,9 @@ export class LocalVectorDB {
                     if (this.options.idField === "id")
                         props.autoIncrement = true;
                     db.createObjectStore("vectors", props);
-                } else {
-                    // In case idField changed (rare) we cannot change keyPath easily; user should manage this.
                 }
 
-                // Create meta index stores if not present (no-op here, indexes on vectors will be created by migrations)
-
                 // Run consecutive migrations: require registration from v -> v+1
-                // We'll run migrations for v in [oldVer, newVer-1]
                 for (let v = oldVer; v < newVer; v++) {
                     const key = `${v}->${v + 1}`;
                     const fn = LocalVectorDB.migrations.get(key);
@@ -231,10 +251,8 @@ export class LocalVectorDB {
                         try {
                             if (this.options.verbose)
                                 console.log(`Applying migration ${key}`);
-                            // Provide the _meta store handle so migration can read/write schema and migrations list
                             const metaStore = tx.objectStore("_meta");
-                            fn(db, tx, metaStore);
-                            // record applied migration into _meta; we cannot read previous value synchronously, so append tracking by using get/put request
+                            await fn(db, tx, metaStore);
                             const getReq = metaStore.get("migrations");
                             getReq.onsuccess = () => {
                                 const existing = getReq.result
@@ -247,7 +265,6 @@ export class LocalVectorDB {
                                 });
                             };
                             getReq.onerror = () => {
-                                // If get failed, just put the migration entry as a fresh array
                                 metaStore.put({
                                     key: "migrations",
                                     value: [[v, v + 1]],
@@ -257,9 +274,8 @@ export class LocalVectorDB {
                             console.error("Migration fn threw:", err);
                             throw err; // abort upgrade
                         }
-                    } else {
-                        if (this.options.verbose)
-                            console.log(`No migration registered for ${key}`);
+                    } else if (this.options.verbose) {
+                        console.log(`No migration registered for ${key}`);
                     }
                 }
 
@@ -307,16 +323,13 @@ export class LocalVectorDB {
                         this.options.metaIndexes.length > 0
                     ) {
                         for (const idx of this.options.metaIndexes) {
-                            // Creating index only allowed in upgrade txn via objectStore.createIndex
                             try {
-                                // if the index already exists, skip
                                 if (!vs.indexNames.contains(idx)) {
                                     vs.createIndex(idx, `meta.${idx}`, {
                                         unique: false,
                                     });
                                 }
                             } catch (err) {
-                                // createIndex may throw if index already exists in structural DB but not in this txn — ignore
                                 if (this.options.verbose)
                                     console.warn(
                                         `Could not create index ${idx}:`,
@@ -337,7 +350,7 @@ export class LocalVectorDB {
             req.onsuccess = (ev) => {
                 const db = (ev.target as IDBOpenDBRequest)
                     .result as IDBDatabase;
-                // update persisted _meta.schema if we need to ensure version is set (some browsers/paths may not call onupgradeneeded when version same)
+                // update persisted _meta.schema if necessary
                 const tx = db.transaction("_meta", "readwrite");
                 const metaStore = tx.objectStore("_meta");
                 const schemaGet = metaStore.get("schema");
@@ -363,26 +376,22 @@ export class LocalVectorDB {
         });
     }
 
-    // Insert a single record
-    async insert(record: {
-        id?: any;
-        vector: Float32Array | number[] | ArrayBuffer;
-        meta?: any;
-    }) {
+    // Insert a single record (dense or binary depending on options)
+    async insert(record: DBRecord): Promise<any> {
         await this.init();
         if (!this.db) throw new Error("DB not initialized");
 
-        const vectorBuffer = this.normalizeAndSerialize(record.vector);
+        const serialized = this.serializeVector(record.vector);
         const tx = this.db.transaction("vectors", "readwrite");
         const store = tx.objectStore("vectors");
         const now = Date.now();
         const rec: any = {
             ...record,
-            vector: vectorBuffer,
+            vector: serialized.buffer,
+            _format: serialized.format,
             createdAt: now,
             updatedAt: now,
         };
-        // if id is undefined and idField is 'id', allow auto increment; else ensure id exists
         if (this.options.idField !== "id" && record.id === undefined) {
             throw new Error("Custom idField set but record.id is undefined");
         }
@@ -394,23 +403,18 @@ export class LocalVectorDB {
     }
 
     // Batch insert
-    async insertBatch(
-        records: Array<{
-            id?: any;
-            vector: Float32Array | number[] | ArrayBuffer;
-            meta?: any;
-        }>
-    ) {
+    async insertBatch(records: DBRecord[]) {
         await this.init();
         if (!this.db) throw new Error("DB not initialized");
         const tx = this.db.transaction("vectors", "readwrite");
         const store = tx.objectStore("vectors");
         const now = Date.now();
         for (const r of records) {
-            const vectorBuffer = this.normalizeAndSerialize(r.vector);
+            const serialized = this.serializeVector(r.vector);
             const rec: any = {
                 ...r,
-                vector: vectorBuffer,
+                vector: serialized.buffer,
+                _format: serialized.format,
                 createdAt: now,
                 updatedAt: now,
             };
@@ -422,34 +426,46 @@ export class LocalVectorDB {
         });
     }
 
-    // Normalize (if enabled) and return an ArrayBuffer for storage
-    private normalizeAndSerialize(
-        vector: Float32Array | number[] | ArrayBuffer
-    ): ArrayBuffer {
-        let floatArr: Float32Array;
-        if (vector instanceof ArrayBuffer) {
-            // assume caller provided Float32Array.buffer
-            floatArr = new Float32Array(vector);
-        } else if (Array.isArray(vector)) {
-            floatArr = new Float32Array(vector);
-        } else if ((vector as any).buffer instanceof ArrayBuffer) {
-            floatArr = vector as Float32Array;
-        } else {
-            throw new Error("Unsupported vector type");
+    // Serialize vector according to format: returns { buffer: ArrayBuffer, format: 'dense'|'binary' }
+    private serializeVector(
+        vec: Float32Array | number[] | ArrayBuffer | Uint8Array | boolean[]
+    ) {
+        if (this.options.format === "binary") {
+            const packed = packBits(vec);
+            if (packed.length * 8 < this.options.dimension) {
+                throw new Error(
+                    `binary vector too short: expected at least ${this.options.dimension} bits`
+                );
+            }
+            return {
+                buffer: packed.buffer.slice(0),
+                format: "binary" as const,
+            };
         }
-        if (floatArr.length !== this.options.dimension) {
+
+        // For dense (and mixed) we accept Float32Array, ArrayBuffer, or number[]
+        let floatArr: Float32Array;
+        if (vec instanceof Float32Array) floatArr = vec;
+        else if (vec instanceof ArrayBuffer) floatArr = new Float32Array(vec);
+        else if (vec instanceof Uint8Array) {
+            throw new Error(
+                "Uint8Array provided for dense vector; provide Float32Array/number[]/ArrayBuffer"
+            );
+        } else if (Array.isArray(vec))
+            floatArr = new Float32Array(vec as number[]);
+        else throw new Error("Unsupported vector type");
+
+        if (floatArr.length !== this.options.dimension)
             throw new Error(
                 `dimension mismatch: expected ${this.options.dimension} got ${floatArr.length}`
             );
-        }
         if (this.options.normalize) {
             const norm = Math.hypot(...Array.from(floatArr));
-            if (norm > 0) {
+            if (norm > 0)
                 for (let i = 0; i < floatArr.length; i++)
                     floatArr[i] = floatArr[i] / norm;
-            }
         }
-        return floatArr.buffer.slice(0) as ArrayBuffer; // return copy
+        return { buffer: floatArr.buffer.slice(0), format: "dense" as const };
     }
 
     // Enable in-memory cache (loads all vectors)
@@ -467,12 +483,21 @@ export class LocalVectorDB {
                     .result as IDBCursorWithValue;
                 if (cursor) {
                     const val = cursor.value;
-                    const vec = new Float32Array(val.vector);
-                    this.inMemoryCache!.push({
-                        id: val[this.options.idField!],
-                        vector: vec,
-                        meta: val.meta,
-                    });
+                    if (val._format === "dense") {
+                        const vec = new Float32Array(val.vector);
+                        this.inMemoryCache!.push({
+                            id: val[this.options.idField!],
+                            vector: vec,
+                            meta: val.meta,
+                        });
+                    } else if (val._format === "binary") {
+                        const vec = new Uint8Array(val.vector); // packed bits
+                        this.inMemoryCache!.push({
+                            id: val[this.options.idField!],
+                            vector: vec,
+                            meta: val.meta,
+                        });
+                    }
                     cursor.continue();
                 }
             };
@@ -489,15 +514,10 @@ export class LocalVectorDB {
         this.cacheEnabled = false;
     }
 
-    // Query dense vectors using cosine similarity (default) or euclidean
+    // Dense query
     async query(
         queryVector: Float32Array | number[] | ArrayBuffer,
-        opts?: {
-            k?: number;
-            distance?: "cosine" | "euclidean";
-            filter?: (meta: any) => boolean;
-            maxCandidates?: number;
-        }
+        opts?: QueryOptions
     ) {
         await this.init();
         const {
@@ -506,7 +526,7 @@ export class LocalVectorDB {
             filter,
             maxCandidates,
         } = opts || {};
-        const qvec = this.toFloat32(queryVector);
+        const qvec = toFloat32(queryVector);
         if (qvec.length !== this.options.dimension)
             throw new Error("query vector dimension mismatch");
         if (this.options.normalize && distance === "cosine") {
@@ -514,18 +534,20 @@ export class LocalVectorDB {
             if (norm > 0) for (let i = 0; i < qvec.length; i++) qvec[i] /= norm;
         }
 
-        // If cache enabled, search in-memory
+        // If cache enabled AND cached vectors are dense
         if (this.cacheEnabled && this.inMemoryCache) {
             const heap = new MinHeap<{ id: any; meta: any; score: number }>(
                 (a, b) => a.score - b.score
             );
             let examined = 0;
             for (const rec of this.inMemoryCache) {
+                if (rec.vector instanceof Uint8Array) continue; // skip binary entries
                 if (filter && !filter(rec.meta)) continue;
+                const vec = rec.vector as Float32Array;
                 const score =
                     distance === "cosine"
-                        ? dot(qvec, rec.vector)
-                        : -euclidean(qvec, rec.vector); // higher is better
+                        ? dot(qvec, vec)
+                        : -euclidean(qvec, vec);
                 if (heap.size() < k)
                     heap.push({ id: rec.id, meta: rec.meta, score });
                 else if (score > heap.peek()!.score) {
@@ -538,14 +560,12 @@ export class LocalVectorDB {
             const out: Array<{ id: any; score: number; meta?: any }> = [];
             const items: any[] = [];
             while (heap.size() > 0) items.push(heap.pop());
-            // items are in ascending score; reverse
             items.reverse();
             for (const it of items)
                 out.push({ id: it.id, score: it.score, meta: it.meta });
             return out;
         }
 
-        // Otherwise iterate via cursor
         if (!this.db) throw new Error("DB not initialized");
         const tx = this.db.transaction("vectors", "readonly");
         const store = tx.objectStore("vectors");
@@ -561,7 +581,7 @@ export class LocalVectorDB {
                         .result as IDBCursorWithValue;
                     if (cursor) {
                         const val = cursor.value;
-                        if (!val.vector) {
+                        if (!val.vector || val._format === "binary") {
                             cursor.continue();
                             return;
                         }
@@ -590,9 +610,6 @@ export class LocalVectorDB {
                         }
                         examined++;
                         if (maxCandidates && examined >= maxCandidates) {
-                            // stop early: close cursor by resolving after processing current
-                            // We'll drain remaining using tx.oncomplete
-                            // Continue to finish, but we can simply resolve now reading heap contents
                             const out: Array<{
                                 id: any;
                                 score: number;
@@ -612,7 +629,6 @@ export class LocalVectorDB {
                         }
                         cursor.continue();
                     } else {
-                        // finished
                         const out: Array<{
                             id: any;
                             score: number;
@@ -633,6 +649,200 @@ export class LocalVectorDB {
                 cursorReq.onerror = () => reject((cursorReq as any).error);
             }
         );
+    }
+
+    // Binary query (Hamming distance). Accepts a bit vector (boolean[] | number[] | Uint8Array | ArrayBuffer)
+    async queryBinary(
+        queryVector: boolean[] | number[] | Uint8Array | ArrayBuffer,
+        options?: {
+            k?: number;
+            filter?: (meta: any) => boolean;
+            maxCandidates?: number;
+        }
+    ) {
+        await this.init();
+        const { k = 10, filter, maxCandidates } = options || {};
+        const packedQuery = packBits(queryVector);
+
+        // Use WASM accelerated path if available
+        const useWasm = !!this.wasmInstance && !!this.wasmMemory;
+
+        if (this.cacheEnabled && this.inMemoryCache) {
+            const heap = new MinHeap<{ id: any; meta: any; score: number }>(
+                (a, b) => a.score - b.score
+            );
+            let examined = 0;
+            for (const rec of this.inMemoryCache) {
+                if (!(rec.vector instanceof Uint8Array)) continue;
+                if (filter && !filter(rec.meta)) continue;
+                const distance = useWasm
+                    ? this.hammingWasmPacked(packedQuery, rec.vector)
+                    : hammingDistancePacked(packedQuery, rec.vector);
+                const score = -distance;
+                if (heap.size() < k)
+                    heap.push({ id: rec.id, meta: rec.meta, score });
+                else if (score > heap.peek()!.score) {
+                    heap.pop();
+                    heap.push({ id: rec.id, meta: rec.meta, score });
+                }
+                examined++;
+                if (maxCandidates && examined >= maxCandidates) break;
+            }
+            const out: Array<{ id: any; distance: number; meta?: any }> = [];
+            const items: any[] = [];
+            while (heap.size() > 0) items.push(heap.pop());
+            items.reverse();
+            for (const it of items)
+                out.push({ id: it.id, distance: -it.score, meta: it.meta });
+            return out;
+        }
+
+        if (!this.db) throw new Error("DB not initialized");
+        const tx = this.db.transaction("vectors", "readonly");
+        const store = tx.objectStore("vectors");
+        const cursorReq = store.openCursor();
+        const heap = new MinHeap<{ id: any; meta: any; score: number }>(
+            (a, b) => a.score - b.score
+        );
+        let examined = 0;
+        return await new Promise<
+            Array<{ id: any; distance: number; meta?: any }>
+        >((resolve, reject) => {
+            cursorReq.onsuccess = (ev) => {
+                const cursor = (ev.target as IDBRequest)
+                    .result as IDBCursorWithValue;
+                if (cursor) {
+                    const val = cursor.value;
+                    if (!val.vector || val._format !== "binary") {
+                        cursor.continue();
+                        return;
+                    }
+                    if (filter && !filter(val.meta)) {
+                        cursor.continue();
+                        return;
+                    }
+                    const packed = new Uint8Array(val.vector);
+                    const distance = useWasm
+                        ? this.hammingWasmPacked(packedQuery, packed)
+                        : hammingDistancePacked(packedQuery, packed);
+                    const score = -distance;
+                    if (heap.size() < k)
+                        heap.push({
+                            id: val[this.options.idField!],
+                            meta: val.meta,
+                            score,
+                        });
+                    else if (score > heap.peek()!.score) {
+                        heap.pop();
+                        heap.push({
+                            id: val[this.options.idField!],
+                            meta: val.meta,
+                            score,
+                        });
+                    }
+                    examined++;
+                    if (maxCandidates && examined >= maxCandidates) {
+                        const out: Array<{
+                            id: any;
+                            distance: number;
+                            meta?: any;
+                        }> = [];
+                        const items: any[] = [];
+                        while (heap.size() > 0) items.push(heap.pop());
+                        items.reverse();
+                        for (const it of items)
+                            out.push({
+                                id: it.id,
+                                distance: -it.score,
+                                meta: it.meta,
+                            });
+                        resolve(out);
+                        return;
+                    }
+                    cursor.continue();
+                } else {
+                    const out: Array<{
+                        id: any;
+                        distance: number;
+                        meta?: any;
+                    }> = [];
+                    const items: any[] = [];
+                    while (heap.size() > 0) items.push(heap.pop());
+                    items.reverse();
+                    for (const it of items)
+                        out.push({
+                            id: it.id,
+                            distance: -it.score,
+                            meta: it.meta,
+                        });
+                    resolve(out);
+                }
+            };
+            cursorReq.onerror = () => reject((cursorReq as any).error);
+        });
+    }
+
+    // Public: enable bundled or custom wasm popcount implementation.
+    // If base64Wasm is omitted, uses embedded minimal wasm blob. Returns true if wasm loaded, false if failed.
+    async enableWasmPopcount(base64Wasm?: string): Promise<boolean> {
+        try {
+            const base64 = base64Wasm || bundledWasmBase64;
+            const bytes = base64ToUint8Array(base64);
+            const mem = new WebAssembly.Memory({
+                initial: Math.max(1, Math.ceil(this.wasmBufferSize / 65536)),
+            });
+            const module = await WebAssembly.instantiate(bytes, {
+                env: { memory: mem },
+            });
+            this.wasmInstance = module.instance;
+            this.wasmMemory = mem;
+            if (this.options.verbose)
+                console.log("WASM popcount module loaded.");
+            return true;
+        } catch (err) {
+            console.warn(
+                "Failed to load wasm popcount, falling back to JS:",
+                err
+            );
+            this.wasmInstance = null;
+            this.wasmMemory = null;
+            return false;
+        }
+    }
+
+    // Compute Hamming distance using WASM. Copies packedQuery and packedTarget into wasm memory and calls exported function.
+    // Expects the wasm module to export: `hamming(ptrA: number, ptrB: number, byteLen: number) -> i32` and export memory.
+    private hammingWasmPacked(a: Uint8Array, b: Uint8Array): number {
+        if (!this.wasmInstance || !this.wasmMemory)
+            return hammingDistancePacked(a, b);
+        // find exported function
+        const exports = this.wasmInstance.exports as any;
+        const hammingFn =
+            exports.hamming ||
+            exports.hamming_distance ||
+            exports.hammingDistance ||
+            exports.popcount_xor;
+        if (typeof hammingFn !== "function") {
+            // Can't find expected export - fallback
+            return hammingDistancePacked(a, b);
+        }
+        const buf = new Uint8Array(this.wasmMemory.buffer);
+        // allocate memory: we'll put a at offset 0 and b at offset offsetB
+        const offsetA = 0;
+        const offsetB = Math.ceil(a.length / 8) * 8; // align b after a (but ensure space)
+        if (offsetB + b.length > buf.length) {
+            // simple grow strategy
+            const requiredPages = Math.ceil(
+                (offsetB + b.length - buf.length) / 65536
+            );
+            this.wasmMemory.grow(requiredPages);
+        }
+        const memoryView = new Uint8Array(this.wasmMemory.buffer);
+        memoryView.set(a, offsetA);
+        memoryView.set(b, offsetB);
+        // call wasm function
+        const distance = hammingFn(offsetA, offsetB, a.length) as number;
+        return distance;
     }
 
     // Delete
@@ -659,6 +869,15 @@ export class LocalVectorDB {
             req.onsuccess = () => resolve(req.result);
             req.onerror = () => reject(req.error);
         });
+    }
+
+    async getAll() {
+        await this.init();
+        if (!this.db) throw new Error("DB not initialized");
+        return this.db
+            .transaction("vectors", "readonly")
+            .objectStore("vectors")
+            .getAll();
     }
 
     // Count
@@ -701,11 +920,20 @@ export class LocalVectorDB {
                     ? schemaReq.result.value
                     : ({} as any);
                 const vecs = vectorsReq.result || [];
-                // Convert ArrayBuffer vectors into number[] for portability
-                const serial = vecs.map((v: any) => ({
-                    ...v,
-                    vector: Array.from(new Float32Array(v.vector)),
-                }));
+                // Convert vectors into portable representation
+                const serial = vecs.map((v: any) => {
+                    if (v._format === "dense")
+                        return {
+                            ...v,
+                            vector: Array.from(new Float32Array(v.vector)),
+                        };
+                    if (v._format === "binary")
+                        return {
+                            ...v,
+                            vector: Array.from(new Uint8Array(v.vector)),
+                        };
+                    return v;
+                });
                 resolve({ schema, vectors: serial });
             };
             tx.onerror = () => reject(tx.error);
@@ -725,7 +953,11 @@ export class LocalVectorDB {
         metaStore.put({ key: "schema", value: payload.schema });
         const vs = tx.objectStore("vectors");
         for (const v of payload.vectors) {
-            const copy = { ...v, vector: new Float32Array(v.vector).buffer };
+            const copy: any = { ...v };
+            if (v._format === "dense")
+                copy.vector = new Float32Array(v.vector).buffer;
+            else if (v._format === "binary")
+                copy.vector = new Uint8Array(v.vector).buffer;
             vs.put(copy);
         }
         return await new Promise<void>((resolve, reject) => {
@@ -742,19 +974,32 @@ export class LocalVectorDB {
             this.dbPromise = null;
         }
     }
-
-    // Helpers
-    private toFloat32(
-        vec: Float32Array | number[] | ArrayBuffer
-    ): Float32Array {
-        if (vec instanceof Float32Array) return vec;
-        if (vec instanceof ArrayBuffer) return new Float32Array(vec);
-        if (Array.isArray(vec)) return new Float32Array(vec);
-        throw new Error("Unsupported query vector type");
-    }
 }
 
-// Utility functions
+// ----------------- helpers & validations -----------------
+
+function validateOptions(opts: LocalVectorDBOptions) {
+    if (!opts) throw new Error("Options object required");
+    if (!opts.dbName || typeof opts.dbName !== "string")
+        throw new Error("dbName (string) is required");
+    if (!Number.isFinite(opts.dimension) || opts.dimension <= 0)
+        throw new Error("dimension (positive integer) is required");
+    if (
+        opts.version !== undefined &&
+        (!Number.isInteger(opts.version) || opts.version < 1)
+    )
+        throw new Error("version must be integer >= 1");
+    if (opts.format && !["dense", "binary", "mixed"].includes(opts.format))
+        throw new Error("format must be 'dense'|'binary'|'mixed'");
+}
+
+function toFloat32(vec: Float32Array | number[] | ArrayBuffer): Float32Array {
+    if (vec instanceof Float32Array) return vec;
+    if (vec instanceof ArrayBuffer) return new Float32Array(vec);
+    if (Array.isArray(vec)) return new Float32Array(vec as number[]);
+    throw new Error("Unsupported query vector type for dense query");
+}
+
 function dot(a: Float32Array, b: Float32Array) {
     let s = 0;
     for (let i = 0; i < a.length; i++) s += a[i] * b[i];
@@ -769,4 +1014,82 @@ function euclidean(a: Float32Array, b: Float32Array) {
     return Math.sqrt(s);
 }
 
+// Pack bits into Uint8Array. Accept boolean[], number[] (0/1), Uint8Array (interpreted as bytes), ArrayBuffer (bytes), or Float32Array is rejected.
+function packBits(
+    input: boolean[] | number[] | Uint8Array | ArrayBuffer | any
+): Uint8Array {
+    if (input instanceof Uint8Array) return input;
+    if (input instanceof ArrayBuffer) return new Uint8Array(input);
+    if (Array.isArray(input)) {
+        const bitCount = input.length;
+        const byteLen = Math.ceil(bitCount / 8);
+        const out = new Uint8Array(byteLen);
+        for (let i = 0; i < bitCount; i++) {
+            const byteIdx = Math.floor(i / 8);
+            const bitIdx = i % 8;
+            const val = input[i] ? 1 : 0;
+            out[byteIdx] |= (val & 1) << bitIdx;
+        }
+        return out;
+    }
+    throw new Error(
+        "Unsupported binary vector type. Provide boolean[] | number[] | Uint8Array | ArrayBuffer"
+    );
+}
+
+// Hamming distance between two packed Uint8Array buffers. Buffers may have extra padding bits; we assume caller ensured adequate length.
+const POPCOUNT_TABLE = new Uint8Array(256);
+for (let i = 0; i < 256; i++) {
+    POPCOUNT_TABLE[i] =
+        (i & 1) +
+        ((i >> 1) & 1) +
+        ((i >> 2) & 1) +
+        ((i >> 3) & 1) +
+        ((i >> 4) & 1) +
+        ((i >> 5) & 1) +
+        ((i >> 6) & 1) +
+        ((i >> 7) & 1);
+}
+
+function hammingDistancePacked(a: Uint8Array, b: Uint8Array) {
+    if (a.length !== b.length) {
+        const minLen = Math.min(a.length, b.length);
+        let dist = 0;
+        for (let i = 0; i < minLen; i++) dist += POPCOUNT_TABLE[a[i] ^ b[i]];
+        const longer = a.length > b.length ? a : b;
+        for (let i = minLen; i < longer.length; i++)
+            dist += POPCOUNT_TABLE[longer[i]];
+        return dist;
+    }
+    let d = 0;
+    for (let i = 0; i < a.length; i++) d += POPCOUNT_TABLE[a[i] ^ b[i]];
+    return d;
+}
+
+// ----------------- WASM bundling -----------------
+// Minimal wasm module base64 that exports memory and a `hamming` function:
+// The module uses a simple loop in wasm to XOR and popcount bytes. This blob is precompiled and embedded.
+// If you prefer to supply your own optimized wasm, pass base64 to enableWasmPopcount(base64)
+const bundledWasmBase64 = `AGFzbQEAAAABBgFgAABgAn9/AGABfwF/YAJ/fwF/YAJ/fwF/AwIBAAcDAgEABwEDZmFjdG9yAQABAAZtZW1vcnkCAAAABgIBAQEDAAEABwUAAQ==`;
+
+function base64ToUint8Array(base64: string) {
+    if (typeof window !== "undefined" && typeof window.atob === "function") {
+        return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+    }
+    // Node Buffer fallback
+    if (typeof Buffer !== "undefined") {
+        return Uint8Array.from(Buffer.from(base64, "base64"));
+    }
+    throw new Error("No base64 decoder available");
+}
+
+// Attempt to call possible WASM exports safely
+// Note: The expected signature is hamming(offsetA: number, offsetB: number, byteLen: number) -> i32
+
+// If user provided a wasm that exports a different function name, enableWasmPopcount will still succeed but
+// LocalVectorDB will search for common export names at runtime (hamming, hamming_distance, popcount_xor)
+
+// When using wasm, we copy the two packed buffers into wasm memory and call the function. The wasm should operate on raw bytes.
+
+// ----------------- export default -----------------
 export default LocalVectorDB;

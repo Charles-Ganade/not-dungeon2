@@ -2,8 +2,7 @@ import type { Component } from "solid-js";
 import { ProviderRegistry } from "./lib/ai/provider";
 import { OllamaProvider } from "./lib/ai/providers/ollama_provider";
 import { PlotCardManager } from "./lib/models/plot_card_manager";
-import { MemoryBank, Memory } from "./lib/models/memory_bank";
-import { openDB } from "idb";
+import { MemoryBank } from "./lib/models/memory_bank";
 import { StoryTurn } from "./lib/models/story_tree";
 
 async function runPlotCardDemo() {
@@ -13,8 +12,10 @@ async function runPlotCardDemo() {
     registry.register(new OllamaProvider());
     const embeddingModel = "nomic-embed-text";
 
-    const plotCardManager = new PlotCardManager(registry, embeddingModel);
+    const plotCardManager = new PlotCardManager(registry, embeddingModel, 768);
     await plotCardManager.init();
+
+    await plotCardManager.clear();
 
     console.log("PlotCardManager initialized.");
 
@@ -62,44 +63,12 @@ async function runPlotCardDemo() {
 
     console.log("\nRemoving all cards...");
     const cards = plotCardManager.getAllPlotCards().map(async (card) => {
-        await plotCardManager.removePlotCard(card.id);
+        await plotCardManager.removePlotCard(card.id!);
     });
     await Promise.all(cards);
 }
 
 async function runMemoryBankDemo() {
-    async function clearMemoryBankStore() {
-        try {
-            console.log(
-                "Attempting to clear 'vectors' store in 'EntityDB' database..."
-            );
-            const db = await openDB("EntityDB"); // Version must match entity-db's init
-            if (db.objectStoreNames.contains("vectors")) {
-                const tx = db.transaction("vectors", "readwrite");
-                await tx.objectStore("vectors").clear();
-                await tx.done;
-                console.log("'vectors' object store cleared successfully.");
-            } else {
-                console.log(
-                    "'vectors' object store not found, skipping clear."
-                );
-            }
-            db.close();
-        } catch (error) {
-            console.error("Error clearing memory bank store:", error);
-        }
-    }
-    async function getRawMemories(memoryBank: MemoryBank): Promise<Memory[]> {
-        const rawDb = await (memoryBank as any).rawDbPromise;
-        if (!rawDb) return [];
-        return await rawDb
-            .transaction("vectors", "readonly")
-            .objectStore("vectors")
-            .getAll();
-    }
-
-    await clearMemoryBankStore();
-
     console.log("Setting up providers and MemoryBank...");
 
     const registry = new ProviderRegistry();
@@ -110,13 +79,16 @@ async function runMemoryBankDemo() {
     const memoryBank = new MemoryBank(
         registry,
         embeddingModel,
-        summarizerModel
+        summarizerModel,
+        768
     );
 
     await memoryBank.init();
 
+    await memoryBank.clear();
+
     console.log("MemoryBank initialized.");
-    console.log("Initial memories loaded:", await getRawMemories(memoryBank));
+    console.log("Initial memories loaded:", memoryBank.getAll());
 
     let currentTurn = 1;
 
@@ -134,7 +106,7 @@ async function runMemoryBankDemo() {
         currentTurn
     );
 
-    console.log("Memories after adding:", await getRawMemories(memoryBank));
+    console.log("Memories after adding:", memoryBank.getAll());
     currentTurn++;
 
     console.log(`\n--- Generating memory at Turn ${currentTurn} ---`);
@@ -149,7 +121,7 @@ async function runMemoryBankDemo() {
         },
     ];
     await memoryBank.generateAndAddMemory(dummyTurns, currentTurn);
-    console.log("Memories after generating:", await getRawMemories(memoryBank));
+    console.log("Memories after generating:", memoryBank.getAll());
     currentTurn++;
 
     console.log(`\n--- Searching at Turn ${currentTurn} ---`);
@@ -160,7 +132,7 @@ async function runMemoryBankDemo() {
 
     console.log(
         "Memories after search (check last_accessed_at_turn):",
-        await getRawMemories(memoryBank)
+        memoryBank.getAll()
     );
     currentTurn++;
 
@@ -171,26 +143,26 @@ async function runMemoryBankDemo() {
     );
     console.log(
         `Added temporary memory (ID: ${tempMemoryId}). Current memories:`,
-        await getRawMemories(memoryBank)
+        memoryBank.getAll()
     );
 
     console.log("\nUndoing addMemory...");
     await memoryBank.applyDelta(deltaPair.revert);
-    console.log("Memories after undo:", await getRawMemories(memoryBank));
+    console.log("Memories after undo:", memoryBank.getAll());
 
     console.log("\nRedoing addMemory...");
     await memoryBank.applyDelta(deltaPair.apply);
     console.log(
         "Memories after redo (check if Nazgul memory is back, ID may differ):",
-        await getRawMemories(memoryBank)
+        memoryBank.getAll()
     );
 
     console.log("\n--- Demo Complete ---");
 }
 
 const App: Component = () => {
-    runMemoryBankDemo().catch(console.error);
-    // runPlotCardDemo().catch(console.error);
+    // runMemoryBankDemo().catch(console.error);
+    runPlotCardDemo().catch(console.error);
     return (
         <p class="text-4xl text-green-700 text-center py-20">Hello tailwind!</p>
     );
