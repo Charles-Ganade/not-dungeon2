@@ -98,19 +98,17 @@ export class StoryTree {
         canFail: boolean = false
     ): DeltaPair | null {
         const oldState = this._getFullState();
-        // deepCopy is essential to avoid mutation before comparison
         const draftState = deepCopy(oldState);
 
         const result = mutator(draftState);
 
         if (canFail && !result) {
-            return null; // The mutation failed or was aborted
+            return null;
         }
 
         const apply = compare(oldState, draftState);
         const revert = compare(draftState, oldState);
 
-        // Apply the change to the *actual* state
         this._setFullState(draftState);
 
         return { apply, revert };
@@ -131,7 +129,7 @@ export class StoryTree {
             }
             if (!node.parentId && draft.rootNodeId) {
                 console.error("Attempting to add a second root node.");
-                return false; // Abort
+                return false;
             }
 
             if (!node.parentId && !draft.rootNodeId) {
@@ -156,7 +154,7 @@ export class StoryTree {
         const mutator = (draft: StoryTreeState) => {
             const node = draft.nodes.get(nodeId);
             if (!node) {
-                return false; // Node not found, fail
+                return false;
             }
             node.turn = newTurnData;
             return true;
@@ -177,7 +175,6 @@ export class StoryTree {
         const deletedNodes: StoryNode[] = [];
 
         const mutator = (draft: StoryTreeState) => {
-            // 1. Unlink from parent
             if (node.parentId) {
                 const parent = draft.nodes.get(node.parentId);
                 if (parent) {
@@ -187,14 +184,13 @@ export class StoryTree {
                 }
             }
 
-            // 2. BFS/DFS to find all descendants and delete
             const stack: string[] = [nodeId];
             while (stack.length > 0) {
                 const currentId = stack.pop()!;
                 const currentNode = draft.nodes.get(currentId);
 
                 if (currentNode) {
-                    stack.push(...currentNode.childrenIds); // Add children
+                    stack.push(...currentNode.childrenIds);
                     draft.nodes.delete(currentId);
                     deletedNodes.push(currentNode);
                 }
@@ -204,9 +200,8 @@ export class StoryTree {
 
         const delta = this._createDeltaPair(mutator, true);
 
-        if (!delta) return null; // Should not happen if root check passed
+        if (!delta) return null;
 
-        // Return leafs-first so re-addition is parent-first
         return { deletedNodes: deletedNodes.reverse(), delta };
     }
 
@@ -244,7 +239,7 @@ export class StoryTree {
         if (turnNumber < 1 || !this.rootNodeId) return [];
 
         const results: StoryNode[] = [];
-        const queue: [string, number][] = [[this.rootNodeId, 1]]; // [nodeId, depth]
+        const queue: [string, number][] = [[this.rootNodeId, 1]];
 
         while (queue.length > 0) {
             const [currentId, currentDepth] = queue.shift()!;
@@ -253,7 +248,7 @@ export class StoryTree {
 
             if (currentDepth === turnNumber) {
                 results.push(node);
-                continue; // Don't traverse deeper
+                continue;
             }
 
             if (currentDepth < turnNumber) {
@@ -271,7 +266,7 @@ export class StoryTree {
         let deepestNode: StoryNode | null =
             this.nodes.get(this.rootNodeId) || null;
         let maxDepth = 1;
-        const queue: [string, number][] = [[this.rootNodeId, 1]]; // [nodeId, depth]
+        const queue: [string, number][] = [[this.rootNodeId, 1]];
 
         while (queue.length > 0) {
             const [currentId, currentDepth] = queue.shift()!;

@@ -105,7 +105,7 @@ export class WorldState {
         const mutator = (draft: { state: any; plots: Plot[] }) => {
             const initialLength = draft.plots.length;
             draft.plots = draft.plots.filter((p) => p.id !== plotId);
-            return draft.plots.length < initialLength; // Return success/failure
+            return draft.plots.length < initialLength;
         };
 
         return this._createDeltaPair(mutator, true);

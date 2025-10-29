@@ -30,7 +30,7 @@ export class GameDirector {
                                 type: "object",
                                 description:
                                     "An partial of the world state containing only the changes to merge into the world state.",
-                                additionalProperties: true, // Allows flexible state structure
+                                additionalProperties: true,
                             },
                         },
                         required: ["partialState"],
@@ -156,7 +156,6 @@ export class GameDirector {
                     strict: false,
                 },
             },
-            // NEW Tool: To handle background simulation results
             {
                 type: "function",
                 function: {
@@ -196,18 +195,18 @@ export class GameDirector {
             ],
             tools: this.worldStateTools.filter((t) =>
                 ["patchState", "addPlot"].includes(t.function.name)
-            ), // Limit tools for init
-            tool_choice: "auto", // Allow multiple calls
+            ),
+            tool_choice: "auto",
             options: options,
-            format: "json", // Helpful for tool use consistency
+            format: "json",
         };
 
-        const response = await this.providerRegistry.chat(params); //
+        const response = await this.providerRegistry.chat(params);
         return response.message.tool_calls as FunctionCall[] | undefined;
     }
 
     public async assessPlayerTurn(
-        context: string, // From ContextBuilder.buildDirectorContext
+        context: string,
         model: string,
         options?: ChatParams["options"]
     ): Promise<{
@@ -225,15 +224,15 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
             model: model,
             messages: [
                 { role: "system", content: systemPrompt },
-                { role: "user", content: context }, // Context includes player input
+                { role: "user", content: context },
             ],
-            tools: this.worldStateTools, // Provide all tools
-            tool_choice: "auto", // Crucial: Allow the LLM to choose which tools to call, potentially multiple
+            tools: this.worldStateTools,
+            tool_choice: "auto",
             options: options,
             think: true,
         };
 
-        const response = await this.providerRegistry.chat(params); //
+        const response = await this.providerRegistry.chat(params);
         return {
             tool_calls: response.message.tool_calls as
                 | FunctionCall[]
@@ -243,7 +242,7 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
     }
 
     public async assessWriterTurn(
-        context: string, // From ContextBuilder.buildDirectorPostWriterContext
+        context: string,
         model: string,
         options?: ChatParams["options"]
     ): Promise<{
@@ -256,7 +255,7 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
             model: model,
             messages: [
                 { role: "system", content: systemPrompt },
-                { role: "user", content: context }, // Context includes writer output
+                { role: "user", content: context },
             ],
             tools: this.worldStateTools.filter((t) =>
                 ["patchState", "updatePlot"].includes(t.function.name)
@@ -266,7 +265,7 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
             think: true,
         };
 
-        const response = await this.providerRegistry.chat(params); //
+        const response = await this.providerRegistry.chat(params);
         return {
             tool_calls: response.message.tool_calls as
                 | FunctionCall[]

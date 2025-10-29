@@ -1,17 +1,3 @@
-/*
-LocalVectorDB - TypeScript implementation (v3)
-- Adds optional WebAssembly-accelerated Hamming distance for binary queries
-- Stronger TypeScript types and public API validations
-- Binary (bitpacked) support and Hamming queries
-- Per-database isolation, automatic migrations (persisted)
-- Normalization default: true
-- Optional in-memory cache (explicit opt-in)
-
-Notes:
-- WASM popcount module is optional. Call `enableWasmPopcount()` with no args to use the bundled minimal WASM, or provide your own base64-encoded wasm.
-- If wasm is unavailable or fails, the implementation falls back to the JavaScript popcount table.
-*/
-
 import { Buffer } from "buffer";
 
 export type VectorFormat = "dense" | "binary" | "mixed";

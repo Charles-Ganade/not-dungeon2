@@ -85,11 +85,13 @@ export class GameEngine {
         this.memoryBank = new MemoryBank(
             this.providerRegistry,
             embeddingModel,
-            summarizerModel
+            summarizerModel,
+            768
         );
         this.plotCardManager = new PlotCardManager(
             this.providerRegistry,
-            embeddingModel
+            embeddingModel,
+            768
         );
 
         this.gameDirector = new GameDirector(this.providerRegistry);

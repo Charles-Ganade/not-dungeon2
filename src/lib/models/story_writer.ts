@@ -3,9 +3,6 @@ import { ProviderRegistry, ChatParams, StreamedChunk } from "../ai/provider";
 export class StoryWriter {
     private providerRegistry: ProviderRegistry;
 
-    /**
-     * @param providerRegistry The central registry for AI provider access.
-     */
     constructor(providerRegistry: ProviderRegistry) {
         this.providerRegistry = providerRegistry;
     }
