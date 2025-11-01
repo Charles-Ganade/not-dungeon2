@@ -6,7 +6,7 @@ export interface Plot {
     title: string;
     description: string;
     player_alignment: number;
-    created_at: Date;
+    created_at_turn: number;
 }
 
 export interface DeltaPair {
@@ -70,7 +70,7 @@ export class WorldState {
         return this._createDeltaPair(mutator) as DeltaPair;
     }
 
-    public addPlot(newPlot: Omit<Plot, "id" | "created_at">): {
+    public addPlot(newPlot: Omit<Plot, "id">): {
         newId: string;
         delta: DeltaPair;
     } {
@@ -79,7 +79,7 @@ export class WorldState {
             draft.plots.push({
                 ...newPlot,
                 id,
-                created_at: new Date(),
+                created_at_turn: newPlot.created_at_turn,
             });
         };
 

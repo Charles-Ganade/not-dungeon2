@@ -1,4 +1,4 @@
-import { Message, Ollama } from "ollama";
+import { Message, Ollama, Tool } from "ollama";
 import {
     AIProvider,
     ChatMessage,
@@ -47,13 +47,14 @@ export class OllamaProvider extends AIProvider {
     }
 
     async chat(params: ChatParams): Promise<ChatResponse> {
+        const { options, format, tools, ...otherParams } = params;
         const response = await this.client.chat({
+            ...otherParams,
+            tools: tools as Tool[],
+            format: format?.valueOf() as string | object,
             model: params.model,
             messages: params.messages.map(this.standardMessageToOllama),
-            options: {
-                ...params.options,
-                num_ctx: params.options?.max_completion_tokens,
-            },
+            options,
         });
 
         const message = response.message;
@@ -67,7 +68,11 @@ export class OllamaProvider extends AIProvider {
     }
 
     async *chatStream(params: ChatParams): AsyncGenerator<StreamedChunk> {
+        const { options, format, tools, ...otherParams } = params;
         const stream = await this.client.chat({
+            ...otherParams,
+            tools: tools as Tool[],
+            format: format?.valueOf() as string | object,
             model: params.model,
             messages: params.messages.map((msg) => ({
                 ...msg,

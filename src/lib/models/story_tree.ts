@@ -28,48 +28,6 @@ type StoryTreeState = {
     rootNodeId: string | null;
 };
 
-/**
- * Represents a tree-like structure of `StoryNode` objects.
- * Each node has an associated `StoryTurn`.
- *
- * @class
- * @example
- * // Create a new instance of the StoryTree class
- * const tree = new StoryTree();
- *
- * // Add a new node to the tree
- * const node = new StoryNode({
- *   id: "nodeId",
- *   parent: null,
- *   children: [],
- *   turn: null,
- * });
- * tree.addNode(node);
- *
- * // Get the root node of the tree
- * const rootNode = tree.getRootNode();
- *
- * // Get the path to a node
- * const path = tree.getPathToNode("nodeId");
- *
- * // Get the depth of a node
- * const depth = tree.getDepth("nodeId");
- *
- * // Get the recent turns of a node
- * const recentTurns = tree.getRecentTurns("nodeId");
- *
- * // Get the nodes at a specific turn number
- * const nodesAtTurn = tree.getNodesAtTurn(2);
- *
- * // Get the deepest node in the tree
- * const deepestNode = tree.getDeepestNode();
- *
- * // Serialize the tree into a SerializedStoryTree object
- * const serializedTree = tree.serialize();
- *
- * // Deserialize a SerializedStoryTree object into a StoryTree instance
- * const deserializedTree = StoryTree.deserialize(serializedTree);
- */
 export class StoryTree {
     private nodes: Map<string, StoryNode> = new Map();
     private rootNodeId: string | null = null;
@@ -106,8 +64,17 @@ export class StoryTree {
             return null;
         }
 
-        const apply = compare(oldState, draftState);
-        const revert = compare(draftState, oldState);
+        const jsonOldState = {
+            ...oldState,
+            nodes: Object.fromEntries(oldState.nodes),
+        };
+        const jsonDraftState = {
+            ...draftState,
+            nodes: Object.fromEntries(draftState.nodes),
+        };
+
+        const apply = compare(jsonOldState, jsonDraftState);
+        const revert = compare(jsonDraftState, jsonOldState);
 
         this._setFullState(draftState);
 
@@ -116,12 +83,25 @@ export class StoryTree {
 
     public applyDelta(delta: Operation[]) {
         const fullObject = this._getFullState();
-        const patched = applyPatch(fullObject, delta, true, false).newDocument;
-        this._setFullState(patched);
+        const jsonFullObject = {
+            ...fullObject,
+            nodes: Object.fromEntries(fullObject.nodes),
+        };
+        const patched = applyPatch(
+            jsonFullObject,
+            delta,
+            true,
+            false
+        ).newDocument;
+        this._setFullState({
+            ...patched,
+            nodes: new Map(Object.entries(patched.nodes)),
+        });
     }
 
     public addNode(node: StoryNode): DeltaPair | null {
         const mutator = (draft: StoryTreeState) => {
+            console.log(draft.nodes);
             if (draft.nodes.has(node.id)) {
                 console.warn(
                     `Node with ID ${node.id} already exists. Overwriting.`

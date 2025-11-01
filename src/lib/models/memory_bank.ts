@@ -217,7 +217,8 @@ export class MemoryBank {
                 { role: "user", content: historyText },
             ],
             model: this.summarizerModel,
-            options: options ?? { temperature: 0.5 /* ... other options */ },
+            think: false,
+            options: options ?? { temperature: 0.5 },
         });
 
         let cleanOutput = response.message.content

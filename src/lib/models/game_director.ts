@@ -180,11 +180,11 @@ export class GameDirector {
         return tools;
     }
 
-    public async initializeWorld(
+    public async *initializeWorldStream(
         context: string,
         model: string,
         options?: ChatParams["options"]
-    ): Promise<FunctionCall[] | undefined> {
+    ): AsyncGenerator<FunctionCall[] | undefined> {
         const systemPrompt = `You are the Game Director initializing a new story world. Based on the context, set up the initial state. Use the available tools ('patchState', 'addPlot') to define starting characters, locations, items, and initial plotlines. Focus only on calling tools.`;
 
         const params: ChatParams = {
@@ -193,23 +193,26 @@ export class GameDirector {
                 { role: "system", content: systemPrompt },
                 { role: "user", content: context },
             ],
-            tools: this.worldStateTools.filter((t) =>
-                ["patchState", "addPlot"].includes(t.function.name)
+            tools: this.worldStateTools.filter((tool) =>
+                ["patchState", "addPlot"].includes(tool.function.name)
             ),
             tool_choice: "auto",
             options: options,
-            format: "json",
+            think: false,
         };
 
-        const response = await this.providerRegistry.chat(params);
-        return response.message.tool_calls as FunctionCall[] | undefined;
+        const response = this.providerRegistry.chatStream(params);
+
+        for await (const chunk of response) {
+            yield chunk.delta.tool_calls;
+        }
     }
 
-    public async assessPlayerTurn(
+    public async *assessPlayerTurnStream(
         context: string,
         model: string,
         options?: ChatParams["options"]
-    ): Promise<{
+    ): AsyncGenerator<{
         tool_calls: FunctionCall[] | undefined;
         thinking: string | undefined;
     }> {
@@ -232,20 +235,21 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
             think: true,
         };
 
-        const response = await this.providerRegistry.chat(params);
-        return {
-            tool_calls: response.message.tool_calls as
-                | FunctionCall[]
-                | undefined,
-            thinking: response.message.thinking,
-        };
+        const response = this.providerRegistry.chatStream(params);
+
+        for await (const chunk of response) {
+            yield {
+                thinking: chunk.delta.thinking,
+                tool_calls: chunk.delta.tool_calls,
+            };
+        }
     }
 
-    public async assessWriterTurn(
+    public async *assessWriterTurnStream(
         context: string,
         model: string,
         options?: ChatParams["options"]
-    ): Promise<{
+    ): AsyncGenerator<{
         tool_calls: FunctionCall[] | undefined;
         thinking: string | undefined;
     }> {
@@ -265,12 +269,13 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
             think: true,
         };
 
-        const response = await this.providerRegistry.chat(params);
-        return {
-            tool_calls: response.message.tool_calls as
-                | FunctionCall[]
-                | undefined,
-            thinking: response.message.thinking,
-        };
+        const response = this.providerRegistry.chatStream(params);
+
+        for await (const chunk of response) {
+            yield {
+                thinking: chunk.delta.thinking,
+                tool_calls: chunk.delta.tool_calls,
+            };
+        }
     }
 }

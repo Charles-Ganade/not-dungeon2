@@ -7,27 +7,6 @@ export class StoryWriter {
         this.providerRegistry = providerRegistry;
     }
 
-    public async writeNextTurn(
-        context: string,
-        model: string,
-        options?: ChatParams["options"]
-    ): Promise<string> {
-        const systemPrompt = `You are a creative story writer. Continue the narrative based on the provided context, focusing on engaging prose and character actions/dialogue. Describe the scene and what happens next.`;
-
-        const params: ChatParams = {
-            model: model,
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: context },
-            ],
-            options: options,
-            tool_choice: "none",
-        };
-
-        const response = await this.providerRegistry.chat(params); //
-        return response.message.content;
-    }
-
     public async *writeNextTurnStream(
         context: string,
         model: string,
@@ -45,7 +24,9 @@ export class StoryWriter {
             tool_choice: "none",
         };
 
-        for await (const chunk of this.providerRegistry.chatStream(params)) {
+        const result = this.providerRegistry.chatStream(params);
+
+        for await (const chunk of result) {
             yield chunk;
         }
     }
