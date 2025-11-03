@@ -1,4 +1,5 @@
 import { ProviderRegistry, ChatParams, StreamedChunk } from "../ai/provider";
+import { STORY_WRITER_PROMPT } from "../prompts";
 
 export class StoryWriter {
     private providerRegistry: ProviderRegistry;
@@ -12,7 +13,7 @@ export class StoryWriter {
         model: string,
         options?: ChatParams["options"]
     ): AsyncGenerator<StreamedChunk> {
-        const systemPrompt = `You are a creative story writer. Continue the narrative based on the provided context, focusing on engaging prose and character actions/dialogue. Describe the scene and what happens next.`;
+        const systemPrompt = STORY_WRITER_PROMPT;
 
         const params: ChatParams = {
             model: model,

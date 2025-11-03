@@ -5,6 +5,7 @@ import {
     ProviderRegistry,
     ToolDefinition,
 } from "../ai/provider";
+import { GAME_DIRECTOR_PROMPTS } from "../prompts";
 
 export class GameDirector {
     private providerRegistry: ProviderRegistry;
@@ -156,26 +157,6 @@ export class GameDirector {
                     strict: false,
                 },
             },
-            {
-                type: "function",
-                function: {
-                    name: "recordBackgroundEvent",
-                    description:
-                        "Records a significant event that happened in the background simulation, outside the player's view. This note might be used by the StoryWriter later.",
-                    parameters: {
-                        type: "object",
-                        properties: {
-                            eventNote: {
-                                type: "string",
-                                description:
-                                    "A brief note describing the background event (e.g., 'Merchant caravan arrived', 'Rival faction captured the McGuffin').",
-                            },
-                        },
-                        required: ["eventNote"],
-                    } as JSONSchema,
-                    strict: false,
-                },
-            },
         ];
         return tools;
     }
@@ -185,7 +166,7 @@ export class GameDirector {
         model: string,
         options?: ChatParams["options"]
     ): AsyncGenerator<FunctionCall[] | undefined> {
-        const systemPrompt = `You are the Game Director initializing a new story world. Based on the context, set up the initial state. Use the available tools ('patchState', 'addPlot') to define starting characters, locations, items, and initial plotlines. Focus only on calling tools.`;
+        const systemPrompt = GAME_DIRECTOR_PROMPTS.initializeWorld;
 
         const params: ChatParams = {
             model: model,
@@ -216,12 +197,7 @@ export class GameDirector {
         tool_calls: FunctionCall[] | undefined;
         thinking: string | undefined;
     }> {
-        const systemPrompt = `You are the Game Director. Analyze the player's action within the game context.
-1. Determine Success/Failure: Call 'determineActionResult' for the player's main action.
-2. Update Plots: Assess player alignment with active plots. Call 'updatePlot' if alignment changes significantly, or 'addPlot'/'removePlot' if necessary based on player actions deviating from or resolving plots.
-3. Simulate Background (Optional): If enough time seems to have passed or consequences ripple outward, briefly simulate events outside the player's view. Use 'patchState' to reflect resulting changes (e.g., NPC movement, item location changes) and 'recordBackgroundEvent' to note significant occurrences.
-4. Direct State Changes: Use 'patchState' for any other direct consequences of the player's action (e.g., item usage, immediate NPC reaction state).
-Focus **only** on calling the necessary tools based on your assessment. Make multiple tool calls if needed.`;
+        const systemPrompt = GAME_DIRECTOR_PROMPTS.assessPlayerTurn;
 
         const params: ChatParams = {
             model: model,
@@ -253,7 +229,7 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
         tool_calls: FunctionCall[] | undefined;
         thinking: string | undefined;
     }> {
-        const systemPrompt = `You are the Game Director. Review the story text that was just written. Identify if the narrative implies any changes to the world state (e.g., a character picked up an item, moved location, changed disposition; a plot point was advanced). If changes are implied, use the 'patchState' or 'updatePlot' tools to update the world state accordingly. If no state changes are implied by the text, do not call any tools. Focus **only** on calling tools for implied state updates.`;
+        const systemPrompt = GAME_DIRECTOR_PROMPTS.assessWriterTurn;
 
         const params: ChatParams = {
             model: model,
@@ -262,7 +238,9 @@ Focus **only** on calling the necessary tools based on your assessment. Make mul
                 { role: "user", content: context },
             ],
             tools: this.worldStateTools.filter((t) =>
-                ["patchState", "updatePlot"].includes(t.function.name)
+                ["patchState", "updatePlot", "addPlot", "removePlot"].includes(
+                    t.function.name
+                )
             ),
             tool_choice: "auto",
             options: options,

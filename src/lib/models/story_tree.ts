@@ -143,6 +143,24 @@ export class StoryTree {
         return this._createDeltaPair(mutator, true);
     }
 
+    public updateNode(
+        nodeId: string,
+        newTurn: StoryTurn,
+        newDeltas: DeltaPair[]
+    ): DeltaPair | null {
+        const mutator = (draft: StoryTreeState) => {
+            const node = draft.nodes.get(nodeId);
+            if (!node) {
+                return false;
+            }
+            node.turn = newTurn;
+            node.deltas = newDeltas;
+            return true;
+        };
+
+        return this._createDeltaPair(mutator, true);
+    }
+
     public deleteBranch(
         nodeId: string
     ): { deletedNodes: StoryNode[]; delta: DeltaPair } | null {

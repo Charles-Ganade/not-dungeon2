@@ -4,6 +4,7 @@ import { deepCopy } from "../util/objects";
 import { DeltaPair } from "./world_state";
 import { StoryTurn } from "./story_tree";
 import { LocalVectorDB } from "../vectordb";
+import { SUMMARIZER_PROMPT } from "../prompts";
 
 export interface Memory {
     id?: number;
@@ -24,6 +25,13 @@ interface MemoryRecord {
     updatedAt?: number;
 }
 
+export interface SerializedMemoryBank {
+    memories: Memory[];
+    embeddingModel: string;
+    summarizerModel: string;
+    vectorDimension: number;
+}
+
 export class MemoryBank {
     private memories: Memory[] = [];
     private db: LocalVectorDB | null = null;
@@ -32,7 +40,7 @@ export class MemoryBank {
     private embeddingModel: string;
     private summarizerModel: string;
     private dbName = "MemoryBankDB";
-    private vectorDimension: number | undefined;
+    private vectorDimension: number;
     constructor(
         providerRegistry: ProviderRegistry,
         embeddingModel: string,
@@ -132,7 +140,11 @@ export class MemoryBank {
         this.memories = targetMemories;
     }
 
-    public async addMemory(text: string, currentTurn: number) {
+    public async addMemory(
+        text: string,
+        currentTurn: number,
+        lastAccessedTurn?: number
+    ) {
         if (!this.db) throw new Error("Memory bank is not initialized");
 
         const { embeddings } = await this.providerRegistry.embed({
@@ -144,7 +156,8 @@ export class MemoryBank {
         const meta = {
             text,
             created_at_turn: currentTurn,
-            last_accessed_at_turn: currentTurn,
+            last_accessed_at_turn:
+                lastAccessedTurn != undefined ? lastAccessedTurn : currentTurn,
         };
 
         const newId = await this.db.insert({
@@ -208,8 +221,7 @@ export class MemoryBank {
             .map((t) => `${t.actor}: ${t.text}`)
             .join("\n");
 
-        const prompt =
-            "Summarize the following story segment into a single, concise memory that captures the key events, facts, or character developments. Output only the summarized memory and nothing else. Do not include your thinking process.";
+        const prompt = SUMMARIZER_PROMPT;
 
         const response = await this.providerRegistry.chat({
             messages: [
@@ -293,5 +305,38 @@ export class MemoryBank {
 
     public getAll() {
         return this.memories;
+    }
+
+    public export(): SerializedMemoryBank {
+        return {
+            memories: this.memories,
+            embeddingModel: this.embeddingModel,
+            summarizerModel: this.summarizerModel,
+            vectorDimension: this.vectorDimension,
+        };
+    }
+
+    static async from(data: SerializedMemoryBank, registry: ProviderRegistry) {
+        const mb = new MemoryBank(
+            registry,
+            data.embeddingModel,
+            data.summarizerModel,
+            data.vectorDimension
+        );
+
+        await mb.init();
+        await mb.clear();
+
+        await Promise.all(
+            data.memories.map(async (mem) => {
+                await mb.addMemory(
+                    mem.text,
+                    mem.created_at_turn,
+                    mem.last_accessed_at_turn
+                );
+            })
+        );
+
+        return mb;
     }
 }

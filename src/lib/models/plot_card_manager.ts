@@ -23,6 +23,12 @@ interface PlotCardRecord {
     updatedAt?: number;
 }
 
+export interface SerializedPlotCardManager {
+    plotCards: PlotCard[];
+    embeddingModel: string;
+    vectorDimension: number;
+}
+
 export class PlotCardManager {
     private plotCards: PlotCard[] = [];
     private db: LocalVectorDB | null = null;
@@ -30,7 +36,7 @@ export class PlotCardManager {
     private providerRegistry: ProviderRegistry;
     private embeddingModel: string;
     private dbName = "PlotCardDB";
-    private vectorDimension: number | undefined;
+    private vectorDimension: number;
 
     constructor(
         providerRegistry: ProviderRegistry,
@@ -253,5 +259,35 @@ export class PlotCardManager {
         if (!this.db) throw new Error("PlotCardManager not initialized.");
         await this.db.clear();
         this.plotCards = [];
+    }
+
+    public export(): SerializedPlotCardManager {
+        return {
+            plotCards: this.plotCards,
+            embeddingModel: this.embeddingModel,
+            vectorDimension: this.vectorDimension,
+        };
+    }
+
+    static async from(
+        data: SerializedPlotCardManager,
+        registry: ProviderRegistry
+    ) {
+        const pcm = new PlotCardManager(
+            registry,
+            data.embeddingModel,
+            data.vectorDimension
+        );
+        await pcm.init();
+        await pcm.clear();
+
+        await Promise.all(
+            data.plotCards.map(async (plot) => {
+                const { id, ...card } = plot;
+                pcm.addPlotCard(card);
+            })
+        );
+
+        return pcm;
     }
 }
